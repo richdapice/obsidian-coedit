@@ -3,7 +3,9 @@ import { type EditorView, keymap } from "@codemirror/view";
 import { editorInfoField, type MarkdownView, Notice } from "obsidian";
 import { yCollab, yUndoManagerKeymap } from "y-codemirror.next";
 import { whenSynced } from "./collab";
+import { applyDiskDiff } from "./disk-sync";
 import type RelayClonePlugin from "./main";
+import { contentHash } from "./paths";
 
 /**
  * Binds CodeMirror editors showing shared files to their per-guid Y.Docs via
@@ -52,15 +54,29 @@ export class EditorBindingManager {
     const folder = this.plugin.folder;
     if (!folder) return;
     this.bound.set(cm, { guid, path });
-    const entry = folder.docs.connect(guid);
+
+    // Load the locally persisted doc and fold offline disk edits into it
+    // BEFORE it sees any remote updates, so Yjs merges the two histories
+    // instead of the diff clobbering remote edits (see disk-sync.ts).
+    const entry = folder.docs.get(guid);
+    await entry.ready;
+    if (this.bound.get(cm)?.guid !== guid) return;
+    const editorText = cm.state.doc.toString();
+    if (
+      entry.ytext.length > 0 &&
+      editorText !== entry.ytext.toString() &&
+      contentHash(editorText) !== folder.syncState.get(guid)
+    ) {
+      applyDiskDiff(entry.doc, entry.ytext, editorText);
+    }
+
+    folder.docs.connect(guid);
+    let online = true;
     try {
       await whenSynced(entry.provider!);
     } catch (err) {
-      this.bound.delete(cm);
-      folder.docs.release(guid);
-      console.error("relay-clone: editor attach failed", err);
-      new Notice(`Relay Clone: could not connect — ${err instanceof Error ? err.message : err}`);
-      return;
+      online = false;
+      console.warn("relay-clone: editor attach offline", err);
     }
 
     // The view may have moved on while we waited for the initial sync.
@@ -75,15 +91,25 @@ export class EditorBindingManager {
       return;
     }
 
-    const editorText = cm.state.doc.toString();
     if (entry.ytext.length === 0 && editorText.length > 0) {
-      // Recovery seeding for a doc the server lost; normally the creator
-      // seeded it at enroll time and this branch never runs.
-      entry.ytext.insert(0, editorText);
+      if (online) {
+        // Recovery seeding for a doc the server lost; normally the creator
+        // seeded it at enroll time and this branch never runs.
+        entry.ytext.insert(0, editorText);
+      } else {
+        // Can't verify the server is really empty; binding now could clear
+        // the note or double-seed later. Stay unbound; edits still sync via
+        // the closed-file pipeline, and the next scan retries.
+        this.bound.delete(cm);
+        folder.docs.release(guid);
+        new Notice("Relay Clone: offline — will bind this note when the server is reachable.");
+        return;
+      }
     }
     const target = entry.ytext.toString();
+    const currentText = cm.state.doc.toString();
     cm.dispatch({
-      ...(target !== editorText
+      ...(target !== currentText
         ? { changes: { from: 0, to: cm.state.doc.length, insert: target } }
         : {}),
       effects: this.compartment.reconfigure([
@@ -91,6 +117,7 @@ export class EditorBindingManager {
         Prec.high(keymap.of(yUndoManagerKeymap)),
       ]),
     });
+    folder.syncState.set(guid, contentHash(target));
   }
 
   private detach(cm: EditorView): void {

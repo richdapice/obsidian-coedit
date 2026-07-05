@@ -1,3 +1,4 @@
+import { IndexeddbPersistence } from "y-indexeddb";
 import type YProvider from "y-partyserver/provider";
 import * as Y from "yjs";
 import { createProvider } from "./collab";
@@ -11,26 +12,40 @@ export interface DocEntry {
   provider: YProvider | null;
   /** Number of editors currently showing this doc. */
   refs: number;
+  /** Resolves once the locally persisted (IndexedDB) state is loaded. */
+  ready: Promise<void>;
 }
 
 /**
- * Per-file Y.Docs, keyed by guid. Open editors hold a live WebSocket via
+ * Per-file Y.Docs, keyed by guid, each persisted to IndexedDB so offline
+ * edits survive restarts. Open editors hold a live WebSocket via
  * connect/release; everything else moves over HTTP pull/push so a big folder
  * doesn't mean a socket per file.
  */
 export class DocManager {
   private entries = new Map<string, DocEntry>();
+  private idbs = new Map<string, IndexeddbPersistence>();
 
   constructor(
     private getSettings: () => RelayCloneSettings,
     private folderId: string,
+    private dbPrefix: string,
   ) {}
 
   get(guid: string): DocEntry {
     let entry = this.entries.get(guid);
     if (!entry) {
       const doc = new Y.Doc();
-      entry = { guid, doc, ytext: doc.getText("contents"), provider: null, refs: 0 };
+      const idb = new IndexeddbPersistence(`${this.dbPrefix}-${guid}`, doc);
+      this.idbs.set(guid, idb);
+      entry = {
+        guid,
+        doc,
+        ytext: doc.getText("contents"),
+        provider: null,
+        refs: 0,
+        ready: idb.whenSynced.then(() => undefined),
+      };
       this.entries.set(guid, entry);
     }
     return entry;
@@ -80,10 +95,14 @@ export class DocManager {
   }
 
   destroy(): void {
+    for (const idb of this.idbs.values()) {
+      void idb.destroy();
+    }
     for (const entry of this.entries.values()) {
       entry.provider?.destroy();
       entry.doc.destroy();
     }
     this.entries.clear();
+    this.idbs.clear();
   }
 }

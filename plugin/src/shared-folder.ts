@@ -1,7 +1,9 @@
 import { type App, TFile, TFolder, type TAbstractFile, type Vault } from "obsidian";
+import { IndexeddbPersistence } from "y-indexeddb";
 import type YProvider from "y-partyserver/provider";
 import * as Y from "yjs";
 import { createProvider, whenSynced } from "./collab";
+import { applyDiskDiff } from "./disk-sync";
 import { DocManager } from "./doc-manager";
 import { roomName } from "./net";
 import {
@@ -18,25 +20,40 @@ import type { VaultApplier } from "./vault-applier";
 /** Origin tag for our own index-map transactions. */
 const LOCAL = "relay-clone-local";
 
+/** Last hash at which disk and CRDT were seen to agree, per guid. */
+export interface SyncStateStore {
+  get(guid: string): string | undefined;
+  set(guid: string, hash: string): void;
+}
+
 /**
  * One shared folder: an always-connected index Y.Doc mapping relative path →
  * {guid, hash, mtime}, plus a DocManager for the per-file content docs.
  * Files are identified by guid; paths are mutable metadata.
+ *
+ * Sync-order invariant: offline disk edits are folded into the local
+ * (IndexedDB-persisted) doc BEFORE that doc receives remote updates, so Yjs
+ * itself merges local and remote edits. Diffing after a remote merge would
+ * delete the remote edits (see disk-sync tests).
  */
 export class SharedFolder {
   readonly doc = new Y.Doc();
   readonly files: Y.Map<FileMeta>;
   readonly provider: YProvider;
   readonly docs: DocManager;
+  private idb: IndexeddbPersistence;
 
   constructor(
     private app: App,
     private getSettings: () => RelayCloneSettings,
     readonly config: SharedFolderConfig,
     private applier: VaultApplier,
+    readonly syncState: SyncStateStore,
+    dbPrefix: string,
   ) {
     this.files = this.doc.getMap<FileMeta>("files");
-    this.docs = new DocManager(getSettings, config.folderId);
+    this.docs = new DocManager(getSettings, config.folderId, dbPrefix);
+    this.idb = new IndexeddbPersistence(`${dbPrefix}-index`, this.doc);
     this.provider = createProvider(getSettings(), roomName(config.folderId, "index"), this.doc);
     this.files.observe((event, txn) => {
       if (txn.origin === LOCAL) return;
@@ -53,6 +70,7 @@ export class SharedFolder {
   destroy(): void {
     this.provider.destroy();
     this.docs.destroy();
+    void this.idb.destroy();
     this.doc.destroy();
   }
 
@@ -82,26 +100,99 @@ export class SharedFolder {
     return this.app.vault;
   }
 
-  // ---- share/join/startup reconciliation (call only after whenConnected)
+  // ---- the per-file sync pipeline (files with no editor bound)
 
-  /** Two-way structural reconcile: pull down remote-only files, enroll local-only files. */
-  async reconcile(): Promise<{ materialized: number; enrolled: number }> {
-    const materialized = await this.materializeMissing();
-    const enrolled = await this.enrollMissing();
-    return { materialized, enrolled };
+  /**
+   * Bring one closed file to convergence: fold offline disk edits into the
+   * local doc, merge remote state, seed lost docs, write the result to disk,
+   * and publish hash/state. Never call for a doc an editor has open.
+   */
+  async syncClosedFile(relPath: string, meta: FileMeta): Promise<void> {
+    const path = this.abs(relPath);
+    const af = this.vault.getAbstractFileByPath(path);
+    const diskText = af instanceof TFile ? await this.vault.cachedRead(af) : null;
+    const entry = this.docs.get(meta.guid);
+    await entry.ready;
+
+    // 1. Fold offline local edits in while the local doc is still at (or
+    //    near) the state the disk text was derived from.
+    let folded = false;
+    if (
+      diskText !== null &&
+      entry.ytext.length > 0 &&
+      contentHash(diskText) !== this.syncState.get(meta.guid) &&
+      diskText !== entry.ytext.toString()
+    ) {
+      applyDiskDiff(entry.doc, entry.ytext, diskText);
+      folded = true;
+    }
+
+    // 2. Merge the server's state (offline is fine; we stay local).
+    try {
+      await this.docs.pull(meta.guid);
+    } catch (err) {
+      console.warn(`relay-clone: pull failed for ${relPath}; continuing offline`, err);
+    }
+
+    // 3. Fresh-device path collision: local file text never entered any doc.
+    //    Fold it into the pulled state (positional merge).
+    if (
+      !folded &&
+      diskText !== null &&
+      diskText.length > 0 &&
+      entry.ytext.length > 0 &&
+      diskText !== entry.ytext.toString() &&
+      contentHash(diskText) !== this.syncState.get(meta.guid)
+    ) {
+      applyDiskDiff(entry.doc, entry.ytext, diskText);
+      folded = true;
+    }
+
+    // 4. Recovery seeding: doc is empty everywhere but disk has content.
+    if (entry.ytext.length === 0 && diskText !== null && diskText.length > 0) {
+      entry.ytext.insert(0, diskText);
+      folded = true;
+    }
+
+    if (folded) {
+      await this.docs.push(meta.guid).catch((err) => {
+        console.warn(`relay-clone: push failed for ${relPath}; will retry next sync`, err);
+      });
+    }
+
+    const finalText = entry.ytext.toString();
+    if (diskText !== finalText) {
+      await this.applier.writeFile(path, finalText);
+    }
+    const finalHash = contentHash(finalText);
+    this.syncState.set(meta.guid, finalHash);
+    const current = this.files.get(relPath);
+    if (current?.guid === meta.guid && current.hash !== finalHash) {
+      this.transact(() =>
+        this.files.set(relPath, { ...current, hash: finalHash, mtime: Date.now() }),
+      );
+    }
   }
 
-  /** Create local files for index entries we don't have yet. */
-  private async materializeMissing(): Promise<number> {
-    let count = 0;
-    for (const [relPath, meta] of this.files.entries()) {
+  // ---- share/join/startup reconciliation (call only after whenConnected)
+
+  /** Two-way reconcile: enroll local-only files, then converge every entry that moved on either side. */
+  async reconcile(): Promise<{ synced: number; enrolled: number }> {
+    const enrolled = await this.enrollMissing();
+    let synced = 0;
+    for (const [relPath, meta] of [...this.files.entries()]) {
+      if (this.docs.isOpen(meta.guid)) continue; // the editor binding owns it
       const path = this.abs(relPath);
-      if (this.vault.getAbstractFileByPath(path)) continue;
-      const entry = await this.docs.pull(meta.guid);
-      await this.applier.writeFile(path, entry.ytext.toString());
-      count++;
+      const af = this.vault.getAbstractFileByPath(path);
+      if (af instanceof TFile) {
+        const last = this.syncState.get(meta.guid);
+        const diskHash = contentHash(await this.vault.cachedRead(af));
+        if (diskHash === last && meta.hash === last) continue; // clean on both sides
+      }
+      await this.syncClosedFile(relPath, meta);
+      synced++;
     }
-    return count;
+    return { synced, enrolled };
   }
 
   /** Enroll local markdown files the index doesn't know about (sharer's first run, or files created while the plugin was off). */
@@ -120,8 +211,12 @@ export class SharedFolder {
     const content = await this.vault.cachedRead(file);
     const guid = crypto.randomUUID();
     const entry = this.docs.get(guid);
+    await entry.ready;
     if (content.length > 0) entry.ytext.insert(0, content);
-    await this.docs.push(guid);
+    await this.docs.push(guid).catch((err) => {
+      console.warn(`relay-clone: seed push failed for ${file.path}; will retry next sync`, err);
+    });
+    this.syncState.set(guid, contentHash(content));
     this.transact(() =>
       this.files.set(this.rel(file.path), {
         guid,
@@ -200,9 +295,9 @@ export class SharedFolder {
   }
 
   /**
-   * Obsidian saved a file (its own autosave for open editors, or another
-   * source). Keep the index hash fresh so peers with the file closed know to
-   * pull; if nothing has the file open here, fold the disk text into ytext.
+   * Obsidian saved a file — its own autosave for open editors, or an edit
+   * from elsewhere. For open files the binding already synced the CRDT: just
+   * publish the hash. For closed files run the full pipeline.
    */
   async onLocalModify(file: TFile): Promise<void> {
     if (this.applier.consumeModify(file.path)) return;
@@ -213,19 +308,12 @@ export class SharedFolder {
     const hash = contentHash(content);
     if (hash === meta.hash) return;
 
-    if (!this.docs.isOpen(meta.guid)) {
-      // No editor bound here, so ytext didn't get this change: replace and
-      // push. (Milestone 4 turns this into a diff-based merge.)
-      const entry = this.docs.get(meta.guid);
-      if (entry.ytext.toString() !== content) {
-        entry.doc.transact(() => {
-          entry.ytext.delete(0, entry.ytext.length);
-          entry.ytext.insert(0, content);
-        });
-      }
-      await this.docs.push(meta.guid);
+    if (this.docs.isOpen(meta.guid)) {
+      this.syncState.set(meta.guid, hash);
+      this.transact(() => this.files.set(rel, { ...meta, hash, mtime: file.stat.mtime }));
+    } else {
+      await this.syncClosedFile(rel, meta);
     }
-    this.transact(() => this.files.set(rel, { ...meta, hash, mtime: file.stat.mtime }));
   }
 
   // ---- remote index changes → disk
@@ -236,34 +324,12 @@ export class SharedFolder {
     for (const r of delta.renamed) {
       await this.applier.rename(this.abs(r.from), this.abs(r.to));
     }
-    for (const a of delta.added) {
-      const path = this.abs(a.path);
-      const entry = await this.docs.pull(a.meta.guid);
-      const existing = this.vault.getAbstractFileByPath(path);
-      if (existing instanceof TFile) {
-        // Path collision: the remote guid wins. If the remote doc is still
-        // empty, our text seeds it; otherwise remote content replaces disk.
-        const local = await this.vault.cachedRead(existing);
-        if (entry.ytext.length === 0 && local.length > 0) {
-          entry.ytext.insert(0, local);
-          await this.docs.push(a.meta.guid);
-          continue;
-        }
-      }
-      await this.applier.writeFile(path, entry.ytext.toString());
-    }
     for (const d of delta.removed) {
       await this.applier.trash(this.abs(d.path));
     }
-    for (const u of delta.updated) {
-      if (this.docs.isOpen(u.meta.guid)) continue; // the editor binding owns it
-      const path = this.abs(u.path);
-      const file = this.vault.getAbstractFileByPath(path);
-      if (!(file instanceof TFile)) continue;
-      const current = await this.vault.cachedRead(file);
-      if (contentHash(current) === u.meta.hash) continue;
-      const entry = await this.docs.pull(u.meta.guid);
-      await this.applier.writeFile(path, entry.ytext.toString());
+    for (const a of [...delta.added, ...delta.updated]) {
+      if (this.docs.isOpen(a.meta.guid)) continue; // live via WebSocket
+      await this.syncClosedFile(a.path, a.meta);
     }
   }
 }

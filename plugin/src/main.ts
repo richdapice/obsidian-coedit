@@ -17,6 +17,9 @@ export default class RelayClonePlugin extends Plugin {
   private applier!: VaultApplier;
   private bindings!: EditorBindingManager;
   private statusEl: HTMLElement | null = null;
+  /** guid → hash at which disk and CRDT last agreed. Persisted with settings. */
+  private syncState: Record<string, string> = {};
+  private saveTimer: number | null = null;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -82,14 +85,30 @@ export default class RelayClonePlugin extends Plugin {
   onunload(): void {
     this.folder?.destroy();
     this.folder = null;
+    if (this.saveTimer !== null) {
+      window.clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+      void this.saveSettings();
+    }
   }
 
   async loadSettings(): Promise<void> {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const data = ((await this.loadData()) ?? {}) as Record<string, unknown>;
+    const { syncState, ...settings } = data;
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, settings);
+    this.syncState = (syncState as Record<string, string> | undefined) ?? {};
   }
 
   async saveSettings(): Promise<void> {
-    await this.saveData(this.settings);
+    await this.saveData({ ...this.settings, syncState: this.syncState });
+  }
+
+  private scheduleSave(): void {
+    if (this.saveTimer !== null) return;
+    this.saveTimer = window.setTimeout(() => {
+      this.saveTimer = null;
+      void this.saveSettings();
+    }, 2000);
   }
 
   /** Tear everything down and reconnect (settings changed, unlink, etc.). */
@@ -103,13 +122,28 @@ export default class RelayClonePlugin extends Plugin {
 
   private async openFolder(config: SharedFolderConfig): Promise<void> {
     this.folder?.destroy();
-    this.folder = new SharedFolder(this.app, () => this.settings, config, this.applier);
+    const appId = (this.app as unknown as { appId?: string }).appId ?? "vault";
+    this.folder = new SharedFolder(
+      this.app,
+      () => this.settings,
+      config,
+      this.applier,
+      {
+        get: (guid) => this.syncState[guid],
+        set: (guid, hash) => {
+          if (this.syncState[guid] === hash) return;
+          this.syncState[guid] = hash;
+          this.scheduleSave();
+        },
+      },
+      `relay-clone-${appId}-${config.folderId}`,
+    );
     this.wireStatus(this.folder);
     try {
       await this.folder.whenConnected();
-      const { materialized, enrolled } = await this.folder.reconcile();
-      if (materialized || enrolled) {
-        new Notice(`Relay Clone: synced (${materialized} pulled, ${enrolled} enrolled)`);
+      const { synced, enrolled } = await this.folder.reconcile();
+      if (synced || enrolled) {
+        new Notice(`Relay Clone: synced (${synced} reconciled, ${enrolled} enrolled)`);
       }
     } catch (err) {
       console.error("relay-clone: could not sync shared folder", err);
@@ -161,6 +195,8 @@ export default class RelayClonePlugin extends Plugin {
       }
       const peers = provider.awareness.getStates().size - 1;
       this.setStatus(`connected · ${peers} peer${peers === 1 ? "" : "s"} online`);
+      // Back online: retry editors that declined to bind while offline.
+      this.bindings.scan();
     };
     provider.on("status", refresh);
     provider.awareness.on("change", refresh);
