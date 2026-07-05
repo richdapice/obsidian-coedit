@@ -1,0 +1,11 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "obsidian-relay-clone",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-01",
+  "durable_objects": {
+    "bindings": [{ "name": "YDocServer", "class_name": "YDocServer" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["YDocServer"] }],
+  "observability": { "enabled": true }
+}

@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.wrangler/
+.dev.vars
+dev/vaults/
+plugin/main.js
+*.log
+.DS_Store

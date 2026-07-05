@@ -1,0 +1,24 @@
+{
+  "name": "obsidian-relay-clone-server",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "check": "tsc -noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "partyserver": "^0.5.8",
+    "y-partyserver": "^2.2.0",
+    "yjs": "^13.6.31"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.18.0",
+    "@cloudflare/workers-types": "^4.20260701.0",
+    "typescript": "^5.8.3",
+    "vitest": "^4.1.9",
+    "wrangler": "^4.107.0",
+    "ws": "^8.18.0"
+  }
+}

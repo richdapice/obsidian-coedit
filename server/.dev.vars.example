@@ -1,0 +1,2 @@
+# Copy to .dev.vars for local development; set with `wrangler secret put SHARED_SECRET` in production.
+SHARED_SECRET=change-me
