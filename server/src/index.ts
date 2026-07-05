@@ -27,14 +27,29 @@ export class YDocServer extends YServer<Env> {
     await this.ctx.storage.put(SNAPSHOT_KEY, update);
   }
 
-  // Background sync in the plugin pulls doc state over plain HTTP so closed
-  // files don't each hold a WebSocket.
-  onRequest(request: Request): Response {
+  // Background sync in the plugin pulls and pushes doc state over plain HTTP
+  // so closed files don't each hold a WebSocket. Applying an update to
+  // this.document broadcasts to connected clients and schedules onSave.
+  async onRequest(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    if (request.method === "GET" && url.pathname.endsWith("/as-update")) {
-      return new Response(Y.encodeStateAsUpdate(this.document) as Uint8Array<ArrayBuffer>, {
-        headers: { "content-type": "application/octet-stream" },
-      });
+    if (url.pathname.endsWith("/as-update")) {
+      if (request.method === "GET") {
+        return new Response(Y.encodeStateAsUpdate(this.document) as Uint8Array<ArrayBuffer>, {
+          headers: { "content-type": "application/octet-stream" },
+        });
+      }
+      if (request.method === "POST") {
+        const body = new Uint8Array(await request.arrayBuffer());
+        if (body.byteLength === 0 || body.byteLength > MAX_SNAPSHOT_BYTES) {
+          return new Response("bad update size", { status: 400 });
+        }
+        try {
+          Y.applyUpdate(this.document, body);
+        } catch {
+          return new Response("malformed update", { status: 400 });
+        }
+        return new Response(null, { status: 204 });
+      }
     }
     return new Response("not found", { status: 404 });
   }

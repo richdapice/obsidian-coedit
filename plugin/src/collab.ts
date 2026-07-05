@@ -1,5 +1,5 @@
 import YProvider from "y-partyserver/provider";
-import * as Y from "yjs";
+import type * as Y from "yjs";
 import type { RelayCloneSettings } from "./settings";
 
 const CURSOR_COLORS = [
@@ -21,51 +21,40 @@ function hashString(s: string): number {
   return Math.abs(h);
 }
 
-export class CollabSession {
-  readonly doc = new Y.Doc();
-  readonly ytext = this.doc.getText("contents");
-  readonly provider: YProvider;
+export function createProvider(
+  settings: RelayCloneSettings,
+  room: string,
+  doc: Y.Doc,
+): YProvider {
+  const provider = new YProvider(settings.serverHost, encodeURIComponent(room), doc, {
+    party: "y-doc-server",
+    params: { token: settings.token },
+    // Vaults on one machine must sync through the server, not a
+    // BroadcastChannel shortcut that would mask connection problems.
+    disableBc: true,
+  });
+  const name = settings.displayName || "anonymous";
+  const color = CURSOR_COLORS[hashString(name) % CURSOR_COLORS.length];
+  provider.awareness.setLocalStateField("user", { name, color, colorLight: `${color}33` });
+  return provider;
+}
 
-  constructor(settings: RelayCloneSettings, room: string) {
-    this.provider = new YProvider(settings.serverHost, encodeURIComponent(room), this.doc, {
-      party: "y-doc-server",
-      params: { token: settings.token },
-      // Two vaults on one machine must sync through the server, not a
-      // BroadcastChannel shortcut that would mask connection problems.
-      disableBc: true,
-    });
-    const name = settings.displayName || "anonymous";
-    const color = CURSOR_COLORS[hashString(name) % CURSOR_COLORS.length];
-    this.provider.awareness.setLocalStateField("user", {
-      name,
-      color,
-      colorLight: `${color}33`,
-    });
-  }
-
-  whenSynced(timeoutMs = 15000): Promise<void> {
-    if (this.provider.synced) return Promise.resolve();
-    return new Promise((resolve, reject) => {
-      const onSynced = (synced: boolean) => {
-        if (!synced) return;
-        cleanup();
-        resolve();
-      };
-      const timer = window.setTimeout(() => {
-        cleanup();
-        reject(new Error(`no sync from ${this.provider.url} within ${timeoutMs}ms`));
-      }, timeoutMs);
-      const cleanup = () => {
-        window.clearTimeout(timer);
-        this.provider.off("synced", onSynced);
-      };
-      this.provider.on("synced", onSynced);
-    });
-  }
-
-  destroy(): void {
-    this.provider.awareness.setLocalState(null);
-    this.provider.destroy();
-    this.doc.destroy();
-  }
+export function whenSynced(provider: YProvider, timeoutMs = 15000): Promise<void> {
+  if (provider.synced) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const onSynced = (synced: boolean) => {
+      if (!synced) return;
+      cleanup();
+      resolve();
+    };
+    const timer = window.setTimeout(() => {
+      cleanup();
+      reject(new Error(`no sync from ${provider.url} within ${timeoutMs}ms`));
+    }, timeoutMs);
+    const cleanup = () => {
+      window.clearTimeout(timer);
+      provider.off("synced", onSynced);
+    };
+    provider.on("synced", onSynced);
+  });
 }

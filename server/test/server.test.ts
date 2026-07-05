@@ -41,6 +41,29 @@ describe("as-update", () => {
     expect(doc.getText("contents").toString()).toBe("hello from the DO");
   });
 
+  it("accepts pushed updates over POST and reflects them in GET", async () => {
+    const src = new Y.Doc();
+    src.getText("contents").insert(0, "pushed over http");
+    const res = await SELF.fetch(`${BASE}/room-e/as-update?token=test-secret`, {
+      method: "POST",
+      body: Y.encodeStateAsUpdate(src) as Uint8Array<ArrayBuffer>,
+    });
+    expect(res.status).toBe(204);
+
+    const back = await SELF.fetch(`${BASE}/room-e/as-update?token=test-secret`);
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, new Uint8Array(await back.arrayBuffer()));
+    expect(doc.getText("contents").toString()).toBe("pushed over http");
+  });
+
+  it("rejects malformed POST bodies", async () => {
+    const res = await SELF.fetch(`${BASE}/room-f/as-update?token=test-secret`, {
+      method: "POST",
+      body: new Uint8Array([1, 2, 3, 4]) as Uint8Array<ArrayBuffer>,
+    });
+    expect(res.status).toBe(400);
+  });
+
   it("404s unknown DO paths", async () => {
     const res = await SELF.fetch(`${BASE}/room-c/bogus?token=test-secret`);
     expect(res.status).toBe(404);
