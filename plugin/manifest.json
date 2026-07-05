@@ -1,0 +1,9 @@
+{
+  "id": "relay-clone",
+  "name": "Relay Clone",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Real-time collaborative editing of shared folders, backed by a self-hosted Cloudflare Durable Objects server.",
+  "author": "Rich Dapice",
+  "isDesktopOnly": false
+}

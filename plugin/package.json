@@ -1,0 +1,30 @@
+{
+  "name": "relay-clone",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "check": "tsc -noEmit -skipLibCheck",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "diff-match-patch": "^1.0.5",
+    "y-codemirror.next": "^0.3.5",
+    "y-indexeddb": "^9.0.12",
+    "y-partyserver": "^2.2.0",
+    "y-protocols": "^1.0.7",
+    "yjs": "^13.6.31"
+  },
+  "devDependencies": {
+    "@codemirror/state": "6.5.0",
+    "@codemirror/view": "6.38.6",
+    "@types/diff-match-patch": "^1.0.36",
+    "builtin-modules": "^4.0.0",
+    "esbuild": "^0.25.5",
+    "obsidian": "^1.13.1",
+    "typescript": "^5.8.3",
+    "vitest": "^4.1.9"
+  }
+}
