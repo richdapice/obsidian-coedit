@@ -42,6 +42,8 @@ export class SharedFolder {
   readonly provider: YProvider;
   readonly docs: DocManager;
   private idb: IndexeddbPersistence;
+  /** Docs whose local state the server may lack (failed pushes to retry). */
+  private pendingPush = new Set<string>();
 
   constructor(
     private app: App,
@@ -56,7 +58,9 @@ export class SharedFolder {
     this.idb = new IndexeddbPersistence(`${dbPrefix}-index`, this.doc);
     this.provider = createProvider(getSettings(), roomName(config.folderId, "index"), this.doc);
     this.files.observe((event, txn) => {
-      if (txn.origin === LOCAL) return;
+      // Skip our own transactions AND IndexedDB's startup replay — the
+      // persisted map is old news, not a remote delta; reconcile() covers it.
+      if (txn.origin === LOCAL || txn.origin === this.idb) return;
       void this.applyRemoteDelta(event).catch((err) => {
         console.error("relay-clone: failed to apply remote folder changes", err);
       });
@@ -105,73 +109,99 @@ export class SharedFolder {
   /**
    * Bring one closed file to convergence: fold offline disk edits into the
    * local doc, merge remote state, seed lost docs, write the result to disk,
-   * and publish hash/state. Never call for a doc an editor has open.
+   * and publish hash/state. Serialized per guid; skips docs an editor holds.
    */
   async syncClosedFile(relPath: string, meta: FileMeta): Promise<void> {
-    const path = this.abs(relPath);
-    const af = this.vault.getAbstractFileByPath(path);
-    const diskText = af instanceof TFile ? await this.vault.cachedRead(af) : null;
-    const entry = this.docs.get(meta.guid);
-    await entry.ready;
+    await this.docs.withLock(meta.guid, async () => {
+      if (this.docs.isOpen(meta.guid)) return; // the editor binding owns it
+      const path = this.abs(relPath);
+      const af = this.vault.getAbstractFileByPath(path);
+      const diskText = af instanceof TFile ? await this.vault.cachedRead(af) : null;
+      const entry = this.docs.get(meta.guid);
+      await entry.ready;
 
-    // 1. Fold offline local edits in while the local doc is still at (or
-    //    near) the state the disk text was derived from.
-    let folded = false;
-    if (
-      diskText !== null &&
-      entry.ytext.length > 0 &&
-      contentHash(diskText) !== this.syncState.get(meta.guid) &&
-      diskText !== entry.ytext.toString()
-    ) {
-      applyDiskDiff(entry.doc, entry.ytext, diskText);
-      folded = true;
-    }
+      // 1. Fold offline local edits in while the local doc is still at the
+      //    state the disk text was derived from — before any remote merge.
+      let folded = false;
+      if (
+        diskText !== null &&
+        entry.ytext.length > 0 &&
+        contentHash(diskText) !== this.syncState.get(meta.guid) &&
+        diskText !== entry.ytext.toString()
+      ) {
+        applyDiskDiff(entry.doc, entry.ytext, diskText);
+        folded = true;
+      }
 
-    // 2. Merge the server's state (offline is fine; we stay local).
-    try {
-      await this.docs.pull(meta.guid);
-    } catch (err) {
-      console.warn(`relay-clone: pull failed for ${relPath}; continuing offline`, err);
-    }
+      // 2. Merge the server's state.
+      let pulled = false;
+      try {
+        await this.docs.pull(meta.guid);
+        pulled = true;
+      } catch (err) {
+        console.warn(`relay-clone: pull failed for ${relPath}; continuing offline`, err);
+      }
 
-    // 3. Fresh-device path collision: local file text never entered any doc.
-    //    Fold it into the pulled state (positional merge).
-    if (
-      !folded &&
-      diskText !== null &&
-      diskText.length > 0 &&
-      entry.ytext.length > 0 &&
-      diskText !== entry.ytext.toString() &&
-      contentHash(diskText) !== this.syncState.get(meta.guid)
-    ) {
-      applyDiskDiff(entry.doc, entry.ytext, diskText);
-      folded = true;
-    }
+      // 3. Fresh-device path collision: local file text never entered any
+      //    doc. Fold it into the pulled state (positional merge).
+      if (
+        !folded &&
+        pulled &&
+        diskText !== null &&
+        diskText.length > 0 &&
+        entry.ytext.length > 0 &&
+        diskText !== entry.ytext.toString() &&
+        contentHash(diskText) !== this.syncState.get(meta.guid)
+      ) {
+        applyDiskDiff(entry.doc, entry.ytext, diskText);
+        folded = true;
+      }
 
-    // 4. Recovery seeding: doc is empty everywhere but disk has content.
-    if (entry.ytext.length === 0 && diskText !== null && diskText.length > 0) {
-      entry.ytext.insert(0, diskText);
-      folded = true;
-    }
+      // 4. Recovery seeding — ONLY when a successful pull proved the doc is
+      //    really empty. Seeding while offline risks a double seed (the
+      //    enroller's copy plus ours) that duplicates the whole text.
+      if (entry.ytext.length === 0 && diskText !== null && diskText.length > 0) {
+        if (!pulled) {
+          // Can't decide safely; leave everything untouched and let the next
+          // reconcile retry.
+          return;
+        }
+        entry.ytext.insert(0, diskText);
+        folded = true;
+      }
 
-    if (folded) {
-      await this.docs.push(meta.guid).catch((err) => {
-        console.warn(`relay-clone: push failed for ${relPath}; will retry next sync`, err);
-      });
-    }
+      // Push when we changed the doc, when an earlier push failed, or when
+      // our doc disagrees with the advertised hash (heals hash ping-pong
+      // after a lost push).
+      const finalText = entry.ytext.toString();
+      const finalHash = contentHash(finalText);
+      const advertised = this.files.get(relPath);
+      if (
+        folded ||
+        this.pendingPush.has(meta.guid) ||
+        (pulled && advertised?.guid === meta.guid && advertised.hash !== finalHash)
+      ) {
+        try {
+          await this.docs.push(meta.guid);
+          this.pendingPush.delete(meta.guid);
+        } catch (err) {
+          this.pendingPush.add(meta.guid);
+          console.warn(`relay-clone: push failed for ${relPath}; queued for retry`, err);
+        }
+      }
 
-    const finalText = entry.ytext.toString();
-    if (diskText !== finalText) {
-      await this.applier.writeFile(path, finalText);
-    }
-    const finalHash = contentHash(finalText);
-    this.syncState.set(meta.guid, finalHash);
-    const current = this.files.get(relPath);
-    if (current?.guid === meta.guid && current.hash !== finalHash) {
-      this.transact(() =>
-        this.files.set(relPath, { ...current, hash: finalHash, mtime: Date.now() }),
-      );
-    }
+      if (diskText !== finalText) {
+        await this.applier.writeFile(path, finalText);
+      }
+      this.syncState.set(meta.guid, finalHash);
+      const current = this.files.get(relPath);
+      if (current?.guid === meta.guid && current.hash !== finalHash) {
+        this.transact(() =>
+          this.files.set(relPath, { ...current, hash: finalHash, mtime: Date.now() }),
+        );
+      }
+      this.docs.evictIfClosed(meta.guid);
+    });
   }
 
   // ---- share/join/startup reconciliation (call only after whenConnected)
@@ -330,6 +360,14 @@ export class SharedFolder {
     for (const a of [...delta.added, ...delta.updated]) {
       if (this.docs.isOpen(a.meta.guid)) continue; // live via WebSocket
       await this.syncClosedFile(a.path, a.meta);
+    }
+    // A peer that renamed AND edited offline delivers both in one
+    // transaction; the rename above moved the file, now sync its content.
+    for (const r of delta.renamed) {
+      if (this.docs.isOpen(r.meta.guid)) continue;
+      if (r.meta.hash !== this.syncState.get(r.meta.guid)) {
+        await this.syncClosedFile(r.to, r.meta);
+      }
     }
   }
 }

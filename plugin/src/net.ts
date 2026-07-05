@@ -1,17 +1,17 @@
 import { requestUrl } from "obsidian";
 import type { RelayCloneSettings } from "./settings";
 
-/** Mirrors YProvider's scheme heuristic: plaintext for localhost/LAN only. */
-function isLocalHost(host: string): boolean {
-  const second = Number(host.split(".")[1]);
-  return (
-    host.startsWith("localhost:") ||
-    host === "localhost" ||
-    host.startsWith("127.") ||
-    host.startsWith("192.168.") ||
-    host.startsWith("10.") ||
-    (host.startsWith("172.") && second >= 16 && second <= 31)
-  );
+/**
+ * Plaintext only for genuine localhost/LAN IP literals — a prefix check
+ * would let a hostname like 10.attacker.example send the token over http.
+ */
+export function isLocalHost(host: string): boolean {
+  const name = host.split(":")[0];
+  if (name === "localhost") return true;
+  const parts = name.split(".");
+  if (parts.length !== 4 || !parts.every((p) => /^\d{1,3}$/.test(p))) return false;
+  const [a, b] = parts.map(Number);
+  return a === 127 || a === 10 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31);
 }
 
 function docUrl(settings: RelayCloneSettings, room: string): string {

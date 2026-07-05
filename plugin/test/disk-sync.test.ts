@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
-import { applyDiskDiff, decideSyncAction } from "../src/disk-sync";
-import { contentHash } from "../src/paths";
+import { applyDiskDiff, mergeTypedEdits } from "../src/disk-sync";
 
 function docWith(text: string): { doc: Y.Doc; ytext: Y.Text } {
   const doc = new Y.Doc();
@@ -15,25 +14,6 @@ function syncDocs(a: Y.Doc, b: Y.Doc): void {
   Y.applyUpdate(b, Y.encodeStateAsUpdate(a));
   Y.applyUpdate(a, Y.encodeStateAsUpdate(b));
 }
-
-describe("decideSyncAction", () => {
-  const h = contentHash;
-  it("noop when disk and CRDT agree", () => {
-    expect(decideSyncAction(h("x"), h("x"), h("old"))).toBe("noop");
-  });
-  it("write-disk when only the CRDT moved", () => {
-    expect(decideSyncAction(h("base"), h("base+remote"), h("base"))).toBe("write-disk");
-  });
-  it("apply-local when only the disk moved", () => {
-    expect(decideSyncAction(h("base+local"), h("base"), h("base"))).toBe("apply-local");
-  });
-  it("merge-diverged when both moved", () => {
-    expect(decideSyncAction(h("base+local"), h("base+remote"), h("base"))).toBe("merge-diverged");
-  });
-  it("merge-diverged with no sync record", () => {
-    expect(decideSyncAction(h("a"), h("b"), undefined)).toBe("merge-diverged");
-  });
-});
 
 describe("applyDiskDiff", () => {
   it("replays offline local edits as minimal ops", () => {
@@ -74,6 +54,29 @@ describe("applyDiskDiff", () => {
     const { doc, ytext } = docWith("same\n");
     const before = Y.encodeStateVector(doc);
     applyDiskDiff(doc, ytext, "same\n");
+    expect(Y.encodeStateVector(doc)).toEqual(before);
+  });
+});
+
+describe("mergeTypedEdits", () => {
+  it("keeps remote edits that arrived while the user was typing unbound", () => {
+    // Editor loaded baseText; user typed on line 1 while a remote edit to
+    // line 3 landed in the CRDT.
+    const base = "alpha\nbeta\ngamma\n";
+    const { doc, ytext } = docWith(base);
+    ytext.insert(ytext.toString().indexOf("gamma"), "remote-inserted\n");
+
+    mergeTypedEdits(doc, ytext, base, "alpha typed\nbeta\ngamma\n");
+
+    const result = ytext.toString();
+    expect(result).toContain("alpha typed");
+    expect(result).toContain("remote-inserted");
+  });
+
+  it("no-ops when nothing was typed", () => {
+    const { doc, ytext } = docWith("text\n");
+    const before = Y.encodeStateVector(doc);
+    mergeTypedEdits(doc, ytext, "text\n", "text\n");
     expect(Y.encodeStateVector(doc)).toEqual(before);
   });
 });

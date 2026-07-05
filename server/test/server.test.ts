@@ -71,7 +71,7 @@ describe("as-update", () => {
 });
 
 describe("persistence", () => {
-  it("round-trips the doc through onSave/onLoad storage format", async () => {
+  it("round-trips the doc through onSave/onLoad chunked storage", async () => {
     const id = env.YDocServer.idFromName("room-d");
     const stub = env.YDocServer.get(id);
     await SELF.fetch(`${BASE}/room-d/as-update?token=test-secret`);
@@ -79,13 +79,38 @@ describe("persistence", () => {
     const stored = await runInDurableObject(stub, async (instance: YDocServer, state) => {
       instance.document.getText("contents").insert(0, "persist me");
       await instance.onSave();
-      const snapshot = await state.storage.get<Uint8Array>("ydoc:snapshot");
-      return snapshot ?? null;
+      const chunks = await state.storage.list<Uint8Array>({ prefix: "ydoc:snapshot:" });
+      const total = [...chunks.values()].reduce((n, c) => n + c.byteLength, 0);
+      const joined = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks.values()) {
+        joined.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      return { joined, chunkCount: chunks.size };
     });
 
-    expect(stored).not.toBeNull();
+    expect(stored.chunkCount).toBeGreaterThan(0);
     const doc = new Y.Doc();
-    Y.applyUpdate(doc, stored!);
+    Y.applyUpdate(doc, stored.joined);
     expect(doc.getText("contents").toString()).toBe("persist me");
+  });
+
+  it("loads legacy single-key snapshots", async () => {
+    const id = env.YDocServer.idFromName("room-legacy");
+    const stub = env.YDocServer.get(id);
+    await SELF.fetch(`${BASE}/room-legacy/as-update?token=test-secret`);
+
+    const text = await runInDurableObject(stub, async (instance: YDocServer, state) => {
+      const src = new Y.Doc();
+      src.getText("contents").insert(0, "from the old format");
+      await state.storage.put("ydoc:snapshot", Y.encodeStateAsUpdate(src));
+      // No chunked snapshot exists for this room, so onLoad takes the
+      // legacy path and applies it to the (empty) live doc.
+      await instance.onLoad();
+      return instance.document.getText("contents").toString();
+    });
+
+    expect(text).toBe("from the old format");
   });
 });

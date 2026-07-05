@@ -1,5 +1,6 @@
 import YProvider from "y-partyserver/provider";
 import type * as Y from "yjs";
+import { isLocalHost } from "./net";
 import type { RelayCloneSettings } from "./settings";
 
 const CURSOR_COLORS = [
@@ -28,6 +29,8 @@ export function createProvider(
 ): YProvider {
   const provider = new YProvider(settings.serverHost, encodeURIComponent(room), doc, {
     party: "y-doc-server",
+    // Explicit scheme: the library's own heuristic is a loose prefix match.
+    protocol: isLocalHost(settings.serverHost) ? "ws" : "wss",
     params: { token: settings.token },
     // Vaults on one machine must sync through the server, not a
     // BroadcastChannel shortcut that would mask connection problems.

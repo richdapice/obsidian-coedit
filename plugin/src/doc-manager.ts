@@ -21,10 +21,16 @@ export interface DocEntry {
  * edits survive restarts. Open editors hold a live WebSocket via
  * connect/release; everything else moves over HTTP pull/push so a big folder
  * doesn't mean a socket per file.
+ *
+ * All mutations of a doc (disk folds, pulls, editor connects) must run under
+ * withLock(guid, …): interleaving a disk fold with a remote merge deletes
+ * remote edits (see disk-sync.ts).
  */
 export class DocManager {
   private entries = new Map<string, DocEntry>();
   private idbs = new Map<string, IndexeddbPersistence>();
+  private locks = new Map<string, Promise<unknown>>();
+  private destroyed = false;
 
   constructor(
     private getSettings: () => RelayCloneSettings,
@@ -32,7 +38,19 @@ export class DocManager {
     private dbPrefix: string,
   ) {}
 
+  /** Serialize async work per guid. Never nest withLock calls. */
+  withLock<T>(guid: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.locks.get(guid) ?? Promise.resolve();
+    const run = prev.then(fn, fn);
+    this.locks.set(
+      guid,
+      run.catch(() => {}),
+    );
+    return run;
+  }
+
   get(guid: string): DocEntry {
+    if (this.destroyed) throw new Error("DocManager used after destroy");
     let entry = this.entries.get(guid);
     if (!entry) {
       const doc = new Y.Doc();
@@ -76,6 +94,20 @@ export class DocManager {
     return (this.entries.get(guid)?.refs ?? 0) > 0;
   }
 
+  /**
+   * Free the doc and its IndexedDB handle if no editor holds it (data stays
+   * in IndexedDB). Call only while holding the guid's lock.
+   */
+  evictIfClosed(guid: string): void {
+    const entry = this.entries.get(guid);
+    if (!entry || entry.refs > 0) return;
+    entry.provider?.destroy();
+    void this.idbs.get(guid)?.destroy();
+    entry.doc.destroy();
+    this.entries.delete(guid);
+    this.idbs.delete(guid);
+  }
+
   /** Merge the server's state into the local doc over HTTP. */
   async pull(guid: string): Promise<DocEntry> {
     const entry = this.get(guid);
@@ -95,6 +127,7 @@ export class DocManager {
   }
 
   destroy(): void {
+    this.destroyed = true;
     for (const idb of this.idbs.values()) {
       void idb.destroy();
     }
@@ -104,5 +137,6 @@ export class DocManager {
     }
     this.entries.clear();
     this.idbs.clear();
+    this.locks.clear();
   }
 }

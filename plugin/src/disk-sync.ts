@@ -1,38 +1,16 @@
 import DiffMatchPatch from "diff-match-patch";
 import type * as Y from "yjs";
-import { contentHash } from "./paths";
 
 /** Origin tag for transactions produced by disk reconciliation. */
-export const DISK_MERGE_ORIGIN = "relay-clone-disk-merge";
-
-export type SyncAction =
-  | "noop" // disk and CRDT agree
-  | "write-disk" // CRDT moved ahead; disk is stale
-  | "apply-local" // disk has offline local edits; CRDT is at our last-synced state
-  | "merge-diverged"; // both moved; fold disk into CRDT positionally
-
-/**
- * Decide how to reconcile a file from three hashes: the disk content, the
- * CRDT text, and the hash we recorded the last time we saw them agree.
- * With no record (fresh join, cleared state) both-differ falls through to a
- * positional merge, which is safe but may interleave imperfectly.
- */
-export function decideSyncAction(
-  diskHash: string,
-  ytextHash: string,
-  lastSyncedHash: string | undefined,
-): SyncAction {
-  if (diskHash === ytextHash) return "noop";
-  if (diskHash === lastSyncedHash) return "write-disk";
-  if (ytextHash === lastSyncedHash) return "apply-local";
-  return "merge-diverged";
-}
+const DISK_MERGE_ORIGIN = "relay-clone-disk-merge";
 
 /**
  * Fold a disk snapshot into a Y.Text by applying a diff-match-patch diff as
- * CRDT operations in one transaction. Concurrent remote edits already in the
- * Y.Text survive wherever the diff doesn't touch them; edits made by other
- * peers *after* this transaction merge through Yjs as usual.
+ * CRDT operations in one transaction. This makes the Y.Text EQUAL the disk
+ * text — it is not a merge. Callers must therefore fold disk edits into the
+ * local doc BEFORE it receives remote updates; folding after a remote merge
+ * deletes the remote edits (see disk-sync tests). Concurrent edits from
+ * other peers arriving *after* this transaction merge through Yjs as usual.
  */
 export function applyDiskDiff(doc: Y.Doc, ytext: Y.Text, diskText: string): void {
   const current = ytext.toString();
@@ -55,7 +33,21 @@ export function applyDiskDiff(doc: Y.Doc, ytext: Y.Text, diskText: string): void
   }, DISK_MERGE_ORIGIN);
 }
 
-/** Convenience wrapper used by callers that only have strings. */
-export function hashOf(text: string): string {
-  return contentHash(text);
+/**
+ * Merge edits typed into an unbound editor (baseText → typedText) into a
+ * Y.Text that may meanwhile contain remote edits. The typed delta is
+ * expressed as fuzzy patches and re-applied against the current CRDT text,
+ * so remote edits survive; overlapping edits resolve in the typist's favor.
+ */
+export function mergeTypedEdits(
+  doc: Y.Doc,
+  ytext: Y.Text,
+  baseText: string,
+  typedText: string,
+): void {
+  if (baseText === typedText) return;
+  const dmp = new DiffMatchPatch();
+  const patches = dmp.patch_make(baseText, typedText);
+  const [merged] = dmp.patch_apply(patches, ytext.toString());
+  applyDiskDiff(doc, ytext, merged);
 }

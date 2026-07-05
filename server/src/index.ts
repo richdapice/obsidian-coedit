@@ -2,29 +2,54 @@ import { routePartykitRequest } from "partyserver";
 import { YServer } from "y-partyserver";
 import * as Y from "yjs";
 
-const SNAPSHOT_KEY = "ydoc:snapshot";
-// A single Durable Object storage value is capped at 2 MiB.
-const MAX_SNAPSHOT_BYTES = 2 * 1024 * 1024;
+// Snapshots are chunked across storage keys: a single Durable Object storage
+// value is capped at 2 MiB, and Yjs state grows monotonically.
+const SNAPSHOT_PREFIX = "ydoc:snapshot:";
+const LEGACY_SNAPSHOT_KEY = "ydoc:snapshot";
+const CHUNK_BYTES = 1024 * 1024;
+// One storage.put() accepts at most 128 pairs → hard ceiling on doc size.
+const MAX_SNAPSHOT_BYTES = 128 * CHUNK_BYTES;
+const MAX_PUSH_BYTES = 8 * 1024 * 1024;
+
+const chunkKey = (i: number) => `${SNAPSHOT_PREFIX}${String(i).padStart(6, "0")}`;
 
 export class YDocServer extends YServer<Env> {
   static options = { hibernate: true };
 
   async onLoad(): Promise<void> {
-    const snapshot = await this.ctx.storage.get<Uint8Array>(SNAPSHOT_KEY);
-    if (snapshot) {
-      Y.applyUpdate(this.document, snapshot);
+    const chunks = await this.ctx.storage.list<Uint8Array>({ prefix: SNAPSHOT_PREFIX });
+    if (chunks.size === 0) {
+      const legacy = await this.ctx.storage.get<Uint8Array>(LEGACY_SNAPSHOT_KEY);
+      if (legacy) Y.applyUpdate(this.document, legacy);
+      return;
     }
+    // list() returns keys sorted; zero-padded indices keep numeric order.
+    const total = [...chunks.values()].reduce((n, c) => n + c.byteLength, 0);
+    const update = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks.values()) {
+      update.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    Y.applyUpdate(this.document, update);
   }
 
   async onSave(): Promise<void> {
     const update = Y.encodeStateAsUpdate(this.document);
     if (update.byteLength > MAX_SNAPSHOT_BYTES) {
-      // Refuse to clobber the last good snapshot with one we can't store.
-      throw new Error(
-        `snapshot for "${this.name}" is ${update.byteLength} bytes, over the ${MAX_SNAPSHOT_BYTES}-byte storage value limit`,
-      );
+      throw new Error(`snapshot for "${this.name}" is ${update.byteLength} bytes; refusing`);
     }
-    await this.ctx.storage.put(SNAPSHOT_KEY, update);
+    const entries: Record<string, Uint8Array> = {};
+    let count = 0;
+    for (let offset = 0; offset < update.byteLength || count === 0; offset += CHUNK_BYTES) {
+      entries[chunkKey(count++)] = update.slice(offset, offset + CHUNK_BYTES);
+    }
+    await this.ctx.storage.put(entries);
+    // Drop stale higher-index chunks from a previously larger snapshot.
+    const existing = await this.ctx.storage.list({ prefix: SNAPSHOT_PREFIX });
+    const stale = [...existing.keys()].filter((k) => k >= chunkKey(count));
+    if (stale.length > 0) await this.ctx.storage.delete(stale);
+    await this.ctx.storage.delete(LEGACY_SNAPSHOT_KEY);
   }
 
   // Background sync in the plugin pulls and pushes doc state over plain HTTP
@@ -40,7 +65,7 @@ export class YDocServer extends YServer<Env> {
       }
       if (request.method === "POST") {
         const body = new Uint8Array(await request.arrayBuffer());
-        if (body.byteLength === 0 || body.byteLength > MAX_SNAPSHOT_BYTES) {
+        if (body.byteLength === 0 || body.byteLength > MAX_PUSH_BYTES) {
           return new Response("bad update size", { status: 400 });
         }
         try {

@@ -35,10 +35,17 @@ export class RelayCloneSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
+    // Save immediately, but debounce the (expensive) reconnect so typing in
+    // a field doesn't tear the session down per keystroke.
+    let restartTimer: number | null = null;
     const update = (apply: (value: string) => void) => async (value: string) => {
       apply(value.trim());
       await this.plugin.saveSettings();
-      this.plugin.restartSession();
+      if (restartTimer !== null) window.clearTimeout(restartTimer);
+      restartTimer = window.setTimeout(() => {
+        restartTimer = null;
+        this.plugin.restartSession();
+      }, 1500);
     };
 
     new Setting(containerEl)

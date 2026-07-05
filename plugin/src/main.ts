@@ -52,11 +52,23 @@ export default class RelayClonePlugin extends Plugin {
     this.app.workspace.onLayoutReady(() => {
       this.registerEvent(
         this.app.vault.on("create", (file) => {
-          if (this.folder?.contains(file.path)) void this.folder.onLocalCreate(file);
+          if (this.folder?.contains(file.path)) {
+            // Scan after enrollment so a freshly created note binds
+            // immediately instead of waiting for the next layout event.
+            void this.folder.onLocalCreate(file).then(() => this.bindings.scan());
+          }
         }),
       );
       this.registerEvent(
         this.app.vault.on("rename", (file, oldPath) => {
+          const config = this.settings.sharedFolder;
+          if (config && oldPath === config.localPath) {
+            // The share root itself moved: follow it.
+            config.localPath = file.path;
+            void this.saveSettings();
+            this.restartSession();
+            return;
+          }
           if (this.folder && (this.folder.contains(file.path) || this.folder.contains(oldPath))) {
             void this.folder.onLocalRename(file, oldPath);
             this.bindings.scan();
@@ -65,6 +77,15 @@ export default class RelayClonePlugin extends Plugin {
       );
       this.registerEvent(
         this.app.vault.on("delete", (file) => {
+          const config = this.settings.sharedFolder;
+          if (config && file.path === config.localPath) {
+            // The share root was deleted: unlink rather than resurrect it.
+            this.settings.sharedFolder = null;
+            void this.saveSettings();
+            this.restartSession();
+            new Notice("Relay Clone: shared folder deleted — unlinked from the share.");
+            return;
+          }
           if (this.folder?.contains(file.path)) this.folder.onLocalDelete(file, file.path);
         }),
       );
@@ -195,10 +216,12 @@ export default class RelayClonePlugin extends Plugin {
       }
       const peers = provider.awareness.getStates().size - 1;
       this.setStatus(`connected · ${peers} peer${peers === 1 ? "" : "s"} online`);
-      // Back online: retry editors that declined to bind while offline.
-      this.bindings.scan();
     };
-    provider.on("status", refresh);
+    provider.on("status", () => {
+      refresh();
+      // Back online: retry editors that declined to bind while offline.
+      if (provider.wsconnected) this.bindings.scan();
+    });
     provider.awareness.on("change", refresh);
     refresh();
   }
