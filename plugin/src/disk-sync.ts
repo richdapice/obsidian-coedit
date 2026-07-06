@@ -2,7 +2,7 @@ import DiffMatchPatch from "diff-match-patch";
 import type * as Y from "yjs";
 
 /** Origin tag for transactions produced by disk reconciliation. */
-const DISK_MERGE_ORIGIN = "relay-clone-disk-merge";
+const DISK_MERGE_ORIGIN = "coedit-disk-merge";
 
 /**
  * Fold a disk snapshot into a Y.Text by applying a diff-match-patch diff as

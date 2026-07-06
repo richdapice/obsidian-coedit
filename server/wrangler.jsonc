@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "obsidian-relay-clone",
+  "name": "coedit-sync",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-01",
   "durable_objects": {

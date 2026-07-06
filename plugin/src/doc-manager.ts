@@ -3,7 +3,7 @@ import type YProvider from "y-partyserver/provider";
 import * as Y from "yjs";
 import { createProvider } from "./collab";
 import { pullDocState, pushDocState, roomName } from "./net";
-import type { RelayCloneSettings } from "./settings";
+import type { CoeditSettings } from "./settings";
 
 export interface DocEntry {
   guid: string;
@@ -33,7 +33,7 @@ export class DocManager {
   private destroyed = false;
 
   constructor(
-    private getSettings: () => RelayCloneSettings,
+    private getSettings: () => CoeditSettings,
     private folderId: string,
     private dbPrefix: string,
   ) {}

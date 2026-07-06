@@ -16,10 +16,10 @@ fi
 
 for name in alice bob; do
   vault="$root/dev/vaults/$name"
-  plugdir="$vault/.obsidian/plugins/relay-clone"
+  plugdir="$vault/.obsidian/plugins/coedit"
   mkdir -p "$plugdir"
   cp "$plugin/main.js" "$plugin/manifest.json" "$plugdir/"
-  echo '["relay-clone"]' > "$vault/.obsidian/community-plugins.json"
+  echo '["coedit"]' > "$vault/.obsidian/community-plugins.json"
   cat > "$plugdir/data.json" <<EOF
 {
   "serverHost": "localhost:8787",

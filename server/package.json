@@ -1,5 +1,5 @@
 {
-  "name": "obsidian-relay-clone-server",
+  "name": "obsidian-coedit-server",
   "private": true,
   "type": "module",
   "scripts": {

@@ -1,4 +1,4 @@
-# Relay Clone
+# Coedit
 
 Real-time collaborative editing for Obsidian, in the spirit of
 [Relay](https://relay.md): share a vault folder, and its markdown files sync

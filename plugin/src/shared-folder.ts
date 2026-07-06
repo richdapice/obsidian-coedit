@@ -14,11 +14,11 @@ import {
   joinPath,
   toRelative,
 } from "./paths";
-import type { RelayCloneSettings, SharedFolderConfig } from "./settings";
+import type { CoeditSettings, SharedFolderConfig } from "./settings";
 import type { VaultApplier } from "./vault-applier";
 
 /** Origin tag for our own index-map transactions. */
-const LOCAL = "relay-clone-local";
+const LOCAL = "coedit-local";
 
 /** Last hash at which disk and CRDT were seen to agree, per guid. */
 export interface SyncStateStore {
@@ -47,7 +47,7 @@ export class SharedFolder {
 
   constructor(
     private app: App,
-    private getSettings: () => RelayCloneSettings,
+    private getSettings: () => CoeditSettings,
     readonly config: SharedFolderConfig,
     private applier: VaultApplier,
     readonly syncState: SyncStateStore,
@@ -62,7 +62,7 @@ export class SharedFolder {
       // persisted map is old news, not a remote delta; reconcile() covers it.
       if (txn.origin === LOCAL || txn.origin === this.idb) return;
       void this.applyRemoteDelta(event).catch((err) => {
-        console.error("relay-clone: failed to apply remote folder changes", err);
+        console.error("coedit: failed to apply remote folder changes", err);
       });
     });
   }
@@ -139,7 +139,7 @@ export class SharedFolder {
         await this.docs.pull(meta.guid);
         pulled = true;
       } catch (err) {
-        console.warn(`relay-clone: pull failed for ${relPath}; continuing offline`, err);
+        console.warn(`coedit: pull failed for ${relPath}; continuing offline`, err);
       }
 
       // 3. Fresh-device path collision: local file text never entered any
@@ -186,7 +186,7 @@ export class SharedFolder {
           this.pendingPush.delete(meta.guid);
         } catch (err) {
           this.pendingPush.add(meta.guid);
-          console.warn(`relay-clone: push failed for ${relPath}; queued for retry`, err);
+          console.warn(`coedit: push failed for ${relPath}; queued for retry`, err);
         }
       }
 
@@ -244,7 +244,7 @@ export class SharedFolder {
     await entry.ready;
     if (content.length > 0) entry.ytext.insert(0, content);
     await this.docs.push(guid).catch((err) => {
-      console.warn(`relay-clone: seed push failed for ${file.path}; will retry next sync`, err);
+      console.warn(`coedit: seed push failed for ${file.path}; will retry next sync`, err);
     });
     this.syncState.set(guid, contentHash(content));
     this.transact(() =>

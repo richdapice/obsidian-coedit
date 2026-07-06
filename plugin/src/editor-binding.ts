@@ -4,7 +4,7 @@ import { editorInfoField, type MarkdownView, Notice } from "obsidian";
 import { yCollab, yUndoManagerKeymap } from "y-codemirror.next";
 import { whenSynced } from "./collab";
 import { applyDiskDiff, mergeTypedEdits } from "./disk-sync";
-import type RelayClonePlugin from "./main";
+import type CoeditPlugin from "./main";
 import { contentHash } from "./paths";
 
 interface BindToken {
@@ -27,7 +27,7 @@ export class EditorBindingManager {
   private compartment = new Compartment();
   private bound = new WeakMap<EditorView, BindToken>();
 
-  constructor(private plugin: RelayClonePlugin) {}
+  constructor(private plugin: CoeditPlugin) {}
 
   extension(): Extension {
     return this.compartment.of([]);
@@ -103,7 +103,7 @@ export class EditorBindingManager {
       await whenSynced(entry.provider!);
     } catch (err) {
       online = false;
-      console.warn("relay-clone: editor attach offline", err);
+      console.warn("coedit: editor attach offline", err);
     }
     if (stale()) {
       bail();
@@ -125,7 +125,7 @@ export class EditorBindingManager {
         // the note or double-seed later. Stay unbound; edits still sync via
         // the closed-file pipeline, and the next scan retries.
         bail();
-        new Notice("Relay Clone: offline — will bind this note when the server is reachable.");
+        new Notice("Coedit: offline — will bind this note when the server is reachable.");
         return;
       }
     }

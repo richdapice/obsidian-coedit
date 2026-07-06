@@ -3,15 +3,15 @@ import { EditorBindingManager } from "./editor-binding";
 import { JoinFolderModal, ShareFolderModal } from "./modals";
 import {
   DEFAULT_SETTINGS,
-  type RelayCloneSettings,
-  RelayCloneSettingTab,
+  type CoeditSettings,
+  CoeditSettingTab,
   type SharedFolderConfig,
 } from "./settings";
 import { SharedFolder } from "./shared-folder";
 import { VaultApplier } from "./vault-applier";
 
-export default class RelayClonePlugin extends Plugin {
-  settings: RelayCloneSettings = DEFAULT_SETTINGS;
+export default class CoeditPlugin extends Plugin {
+  settings: CoeditSettings = DEFAULT_SETTINGS;
   folder: SharedFolder | null = null;
 
   private applier!: VaultApplier;
@@ -25,7 +25,7 @@ export default class RelayClonePlugin extends Plugin {
     await this.loadSettings();
     this.applier = new VaultApplier(this.app);
     this.bindings = new EditorBindingManager(this);
-    this.addSettingTab(new RelayCloneSettingTab(this.app, this));
+    this.addSettingTab(new CoeditSettingTab(this.app, this));
     this.registerEditorExtension(this.bindings.extension());
     this.statusEl = this.addStatusBarItem();
     this.setStatus("idle");
@@ -83,7 +83,7 @@ export default class RelayClonePlugin extends Plugin {
             this.settings.sharedFolder = null;
             void this.saveSettings();
             this.restartSession();
-            new Notice("Relay Clone: shared folder deleted — unlinked from the share.");
+            new Notice("Coedit: shared folder deleted — unlinked from the share.");
             return;
           }
           if (this.folder?.contains(file.path)) this.folder.onLocalDelete(file, file.path);
@@ -157,19 +157,19 @@ export default class RelayClonePlugin extends Plugin {
           this.scheduleSave();
         },
       },
-      `relay-clone-${appId}-${config.folderId}`,
+      `coedit-${appId}-${config.folderId}`,
     );
     this.wireStatus(this.folder);
     try {
       await this.folder.whenConnected();
       const { synced, enrolled } = await this.folder.reconcile();
       if (synced || enrolled) {
-        new Notice(`Relay Clone: synced (${synced} reconciled, ${enrolled} enrolled)`);
+        new Notice(`Coedit: synced (${synced} reconciled, ${enrolled} enrolled)`);
       }
     } catch (err) {
-      console.error("relay-clone: could not sync shared folder", err);
+      console.error("coedit: could not sync shared folder", err);
       new Notice(
-        `Relay Clone: offline — ${err instanceof Error ? err.message : err}`,
+        `Coedit: offline — ${err instanceof Error ? err.message : err}`,
       );
     }
     this.bindings.scan();
@@ -177,11 +177,11 @@ export default class RelayClonePlugin extends Plugin {
 
   private async shareFolder(folderPath: string): Promise<void> {
     if (this.settings.sharedFolder) {
-      new Notice("Relay Clone: a folder is already shared; unlink it first in settings.");
+      new Notice("Coedit: a folder is already shared; unlink it first in settings.");
       return;
     }
     if (!this.app.vault.getFolderByPath(folderPath)) {
-      new Notice(`Relay Clone: no folder at "${folderPath}"`);
+      new Notice(`Coedit: no folder at "${folderPath}"`);
       return;
     }
     const config: SharedFolderConfig = { localPath: folderPath, folderId: crypto.randomUUID() };
@@ -189,12 +189,12 @@ export default class RelayClonePlugin extends Plugin {
     await this.saveSettings();
     await this.openFolder(config);
     await navigator.clipboard.writeText(config.folderId);
-    new Notice(`Relay Clone: shared "${folderPath}" — folder ID copied to clipboard.`);
+    new Notice(`Coedit: shared "${folderPath}" — folder ID copied to clipboard.`);
   }
 
   private async joinFolder(folderId: string, localPath: string): Promise<void> {
     if (this.settings.sharedFolder) {
-      new Notice("Relay Clone: a folder is already shared; unlink it first in settings.");
+      new Notice("Coedit: a folder is already shared; unlink it first in settings.");
       return;
     }
     if (!this.app.vault.getFolderByPath(localPath)) {
@@ -227,6 +227,6 @@ export default class RelayClonePlugin extends Plugin {
   }
 
   private setStatus(text: string): void {
-    this.statusEl?.setText(`Relay: ${text}`);
+    this.statusEl?.setText(`Coedit: ${text}`);
   }
 }

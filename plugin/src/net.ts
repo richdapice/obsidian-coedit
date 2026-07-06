@@ -1,5 +1,5 @@
 import { requestUrl } from "obsidian";
-import type { RelayCloneSettings } from "./settings";
+import type { CoeditSettings } from "./settings";
 
 /**
  * Plaintext only for genuine localhost/LAN IP literals — a prefix check
@@ -14,7 +14,7 @@ export function isLocalHost(host: string): boolean {
   return a === 127 || a === 10 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31);
 }
 
-function docUrl(settings: RelayCloneSettings, room: string): string {
+function docUrl(settings: CoeditSettings, room: string): string {
   const scheme = isLocalHost(settings.serverHost) ? "http" : "https";
   return `${scheme}://${settings.serverHost}/parties/y-doc-server/${encodeURIComponent(room)}/as-update?token=${encodeURIComponent(settings.token)}`;
 }
@@ -24,7 +24,7 @@ export function roomName(folderId: string, docId: string): string {
 }
 
 /** GET the server's current doc state as a Yjs update. requestUrl bypasses CORS. */
-export async function pullDocState(settings: RelayCloneSettings, room: string): Promise<Uint8Array> {
+export async function pullDocState(settings: CoeditSettings, room: string): Promise<Uint8Array> {
   const res = await requestUrl({ url: docUrl(settings, room), throw: false });
   if (res.status !== 200) throw new Error(`pull ${room}: HTTP ${res.status}`);
   return new Uint8Array(res.arrayBuffer);
@@ -32,7 +32,7 @@ export async function pullDocState(settings: RelayCloneSettings, room: string): 
 
 /** POST a Yjs update; the server applies it, broadcasts, and persists. */
 export async function pushDocState(
-  settings: RelayCloneSettings,
+  settings: CoeditSettings,
   room: string,
   update: Uint8Array,
 ): Promise<void> {

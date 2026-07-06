@@ -1,7 +1,7 @@
 import YProvider from "y-partyserver/provider";
 import type * as Y from "yjs";
 import { isLocalHost } from "./net";
-import type { RelayCloneSettings } from "./settings";
+import type { CoeditSettings } from "./settings";
 
 const CURSOR_COLORS = [
   "#30bced",
@@ -23,7 +23,7 @@ function hashString(s: string): number {
 }
 
 export function createProvider(
-  settings: RelayCloneSettings,
+  settings: CoeditSettings,
   room: string,
   doc: Y.Doc,
 ): YProvider {

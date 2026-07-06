@@ -1,5 +1,5 @@
 import { type App, PluginSettingTab, Setting } from "obsidian";
-import type RelayClonePlugin from "./main";
+import type CoeditPlugin from "./main";
 
 export interface SharedFolderConfig {
   /** Vault-relative folder path, no trailing slash. */
@@ -8,7 +8,7 @@ export interface SharedFolderConfig {
   folderId: string;
 }
 
-export interface RelayCloneSettings {
+export interface CoeditSettings {
   /** host[:port] without scheme; ws/http for localhost & LAN, wss/https otherwise. */
   serverHost: string;
   token: string;
@@ -16,17 +16,17 @@ export interface RelayCloneSettings {
   sharedFolder: SharedFolderConfig | null;
 }
 
-export const DEFAULT_SETTINGS: RelayCloneSettings = {
+export const DEFAULT_SETTINGS: CoeditSettings = {
   serverHost: "localhost:8787",
   token: "",
   displayName: "",
   sharedFolder: null,
 };
 
-export class RelayCloneSettingTab extends PluginSettingTab {
+export class CoeditSettingTab extends PluginSettingTab {
   constructor(
     app: App,
-    private plugin: RelayClonePlugin,
+    private plugin: CoeditPlugin,
   ) {
     super(app, plugin);
   }
