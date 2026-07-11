@@ -52,7 +52,9 @@ export function whenSynced(provider: YProvider, timeoutMs = 15000): Promise<void
     };
     const timer = window.setTimeout(() => {
       cleanup();
-      reject(new Error(`no sync from ${provider.url} within ${timeoutMs}ms`));
+      // Strip the query string: it carries the auth token, and this message
+      // surfaces in notices/screenshots.
+      reject(new Error(`no sync from ${provider.url.split("?")[0]} within ${timeoutMs}ms`));
     }, timeoutMs);
     const cleanup = () => {
       window.clearTimeout(timer);
