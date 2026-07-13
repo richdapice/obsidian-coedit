@@ -1,4 +1,7 @@
+import type { EditorView } from "@codemirror/view";
 import { Notice, Plugin, TFile } from "obsidian";
+import { userIdentity } from "./collab";
+import { addComment, CommentModal } from "./comments";
 import { EditorBindingManager } from "./editor-binding";
 import { JoinFolderModal, ShareFolderModal } from "./modals";
 import { isLocalHost, roomName } from "./net";
@@ -71,6 +74,29 @@ export default class CoeditPlugin extends Plugin {
           return;
         }
         void showVersionHistory(this, folder, folder.relPath(file.path), meta);
+      },
+    });
+    this.addCommand({
+      id: "comment-on-selection",
+      name: "Comment on selection",
+      editorCallback: (editor, ctx) => {
+        const file = ctx.file;
+        const folder = file ? this.folderFor(file.path) : undefined;
+        const meta = file && folder ? folder.metaFor(file.path) : undefined;
+        if (!file || !folder || !meta || meta.kind === "blob") {
+          new Notice("Coedit: the active note isn't in a shared folder.");
+          return;
+        }
+        if (!folder.docs.isOpen(meta.guid)) {
+          new Notice("Coedit: still connecting this note — try again in a moment.");
+          return;
+        }
+        const cm = (editor as unknown as { cm?: EditorView }).cm;
+        if (!cm) return;
+        const { from, to } = cm.state.selection.main;
+        new CommentModal(this.app, (text) => {
+          addComment(folder.docs.get(meta.guid), { from, to }, userIdentity(this.settings), text);
+        }).open();
       },
     });
     this.addCommand({

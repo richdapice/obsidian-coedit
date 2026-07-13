@@ -7,3 +7,44 @@
   flex-shrink: 0;
   align-self: center;
 }
+
+.coedit-comment {
+  text-decoration: underline dotted 2px;
+  text-underline-offset: 3px;
+  background: rgba(255, 200, 0, 0.12);
+}
+
+.coedit-comment-tooltip {
+  max-width: 22rem;
+  padding: 4px;
+}
+
+.coedit-comment-item {
+  padding: 6px 8px;
+}
+
+.coedit-comment-item + .coedit-comment-item {
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.coedit-comment-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+
+.coedit-comment-author {
+  font-weight: 600;
+}
+
+.coedit-comment-time {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  flex-grow: 1;
+}
+
+.coedit-comment-input {
+  width: 100%;
+  resize: vertical;
+}

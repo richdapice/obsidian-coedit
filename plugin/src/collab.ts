@@ -22,6 +22,12 @@ function hashString(s: string): number {
   return Math.abs(h);
 }
 
+/** Stable name+color identity derived from settings (cursors, comments). */
+export function userIdentity(settings: CoeditSettings): { name: string; color: string } {
+  const name = settings.displayName || "anonymous";
+  return { name, color: CURSOR_COLORS[hashString(name) % CURSOR_COLORS.length] };
+}
+
 export function createProvider(
   settings: CoeditSettings,
   room: string,
@@ -36,8 +42,7 @@ export function createProvider(
     // BroadcastChannel shortcut that would mask connection problems.
     disableBc: true,
   });
-  const name = settings.displayName || "anonymous";
-  const color = CURSOR_COLORS[hashString(name) % CURSOR_COLORS.length];
+  const { name, color } = userIdentity(settings);
   provider.awareness.setLocalStateField("user", { name, color, colorLight: `${color}33` });
   return provider;
 }
