@@ -1,6 +1,7 @@
 import { Notice, Plugin, TFile } from "obsidian";
 import { EditorBindingManager } from "./editor-binding";
 import { JoinFolderModal, ShareFolderModal } from "./modals";
+import { isUnder } from "./paths";
 import {
   DEFAULT_SETTINGS,
   type CoeditSettings,
@@ -12,7 +13,7 @@ import { VaultApplier } from "./vault-applier";
 
 export default class CoeditPlugin extends Plugin {
   settings: CoeditSettings = DEFAULT_SETTINGS;
-  folder: SharedFolder | null = null;
+  folders: SharedFolder[] = [];
 
   private applier!: VaultApplier;
   private bindings!: EditorBindingManager;
@@ -20,6 +21,11 @@ export default class CoeditPlugin extends Plugin {
   /** guid → hash at which disk and CRDT last agreed. Persisted with settings. */
   private syncState: Record<string, string> = {};
   private saveTimer: number | null = null;
+
+  /** The shared folder (if any) containing this vault path. */
+  folderFor(path: string): SharedFolder | undefined {
+    return this.folders.find((f) => f.contains(path));
+  }
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -52,60 +58,68 @@ export default class CoeditPlugin extends Plugin {
     this.app.workspace.onLayoutReady(() => {
       this.registerEvent(
         this.app.vault.on("create", (file) => {
-          if (this.folder?.contains(file.path)) {
+          const folder = this.folderFor(file.path);
+          if (folder) {
             // Scan after enrollment so a freshly created note binds
             // immediately instead of waiting for the next layout event.
-            void this.folder.onLocalCreate(file).then(() => this.bindings.scan());
+            void folder.onLocalCreate(file).then(() => this.bindings.scan());
           }
         }),
       );
       this.registerEvent(
         this.app.vault.on("rename", (file, oldPath) => {
-          const config = this.settings.sharedFolder;
-          if (config && oldPath === config.localPath) {
+          const rootMoved = this.settings.sharedFolders.find((c) => c.localPath === oldPath);
+          if (rootMoved) {
             // The share root itself moved: follow it.
-            config.localPath = file.path;
+            rootMoved.localPath = file.path;
             void this.saveSettings();
             this.restartSession();
             return;
           }
-          if (this.folder && (this.folder.contains(file.path) || this.folder.contains(oldPath))) {
-            void this.folder.onLocalRename(file, oldPath);
-            this.bindings.scan();
+          const from = this.folderFor(oldPath);
+          const to = this.folderFor(file.path);
+          if (from && from === to) {
+            void from.onLocalRename(file, oldPath);
+          } else {
+            // Crossing a share boundary (or entering/leaving one) is a
+            // delete on one side and a create on the other.
+            if (from) from.onLocalDelete(file, oldPath);
+            if (to) void to.onLocalCreate(file).then(() => this.bindings.scan());
           }
+          this.bindings.scan();
         }),
       );
       this.registerEvent(
         this.app.vault.on("delete", (file) => {
-          const config = this.settings.sharedFolder;
-          if (config && file.path === config.localPath) {
+          const rootGone = this.settings.sharedFolders.find((c) => c.localPath === file.path);
+          if (rootGone) {
             // The share root was deleted: unlink rather than resurrect it.
-            this.settings.sharedFolder = null;
+            this.settings.sharedFolders = this.settings.sharedFolders.filter((c) => c !== rootGone);
             void this.saveSettings();
             this.restartSession();
-            new Notice("Coedit: shared folder deleted — unlinked from the share.");
+            new Notice(`Coedit: "${rootGone.localPath}" deleted — unlinked from the share.`);
             return;
           }
-          if (this.folder?.contains(file.path)) this.folder.onLocalDelete(file, file.path);
+          this.folderFor(file.path)?.onLocalDelete(file, file.path);
         }),
       );
       this.registerEvent(
         this.app.vault.on("modify", (file) => {
-          if (file instanceof TFile && this.folder?.contains(file.path)) {
-            void this.folder.onLocalModify(file);
-          }
+          if (!(file instanceof TFile)) return;
+          const folder = this.folderFor(file.path);
+          if (folder) void folder.onLocalModify(file);
         }),
       );
       this.registerEvent(this.app.workspace.on("file-open", () => this.bindings.scan()));
       this.registerEvent(this.app.workspace.on("layout-change", () => this.bindings.scan()));
 
-      if (this.settings.sharedFolder) void this.openFolder(this.settings.sharedFolder);
+      void this.openAllFolders();
     });
   }
 
   onunload(): void {
-    this.folder?.destroy();
-    this.folder = null;
+    for (const folder of this.folders) folder.destroy();
+    this.folders = [];
     if (this.saveTimer !== null) {
       window.clearTimeout(this.saveTimer);
       this.saveTimer = null;
@@ -115,8 +129,15 @@ export default class CoeditPlugin extends Plugin {
 
   async loadSettings(): Promise<void> {
     const data = ((await this.loadData()) ?? {}) as Record<string, unknown>;
-    const { syncState, ...settings } = data;
+    const { syncState, sharedFolder, ...settings } = data as Record<string, unknown> & {
+      sharedFolder?: SharedFolderConfig | null;
+    };
     this.settings = Object.assign({}, DEFAULT_SETTINGS, settings);
+    // Migrate the pre-multi-folder shape.
+    if (!Array.isArray(this.settings.sharedFolders)) this.settings.sharedFolders = [];
+    if (sharedFolder && this.settings.sharedFolders.length === 0) {
+      this.settings.sharedFolders = [sharedFolder];
+    }
     this.syncState = (syncState as Record<string, string> | undefined) ?? {};
   }
 
@@ -135,16 +156,20 @@ export default class CoeditPlugin extends Plugin {
   /** Tear everything down and reconnect (settings changed, unlink, etc.). */
   restartSession(): void {
     this.bindings.detachAll();
-    this.folder?.destroy();
-    this.folder = null;
+    for (const folder of this.folders) folder.destroy();
+    this.folders = [];
     this.setStatus("idle");
-    if (this.settings.sharedFolder) void this.openFolder(this.settings.sharedFolder);
+    void this.openAllFolders();
   }
 
-  private async openFolder(config: SharedFolderConfig): Promise<void> {
-    this.folder?.destroy();
+  private async openAllFolders(): Promise<void> {
+    await Promise.all(this.settings.sharedFolders.map((config) => this.openFolder(config)));
+    this.refreshStatus();
+  }
+
+  private async openFolder(config: SharedFolderConfig): Promise<SharedFolder> {
     const appId = (this.app as unknown as { appId?: string }).appId ?? "vault";
-    this.folder = new SharedFolder(
+    const folder = new SharedFolder(
       this.app,
       () => this.settings,
       config,
@@ -159,25 +184,33 @@ export default class CoeditPlugin extends Plugin {
       },
       `coedit-${appId}-${config.folderId}`,
     );
-    this.wireStatus(this.folder);
+    this.folders.push(folder);
+    this.wireStatus(folder);
     try {
-      await this.folder.whenConnected();
-      const { synced, enrolled } = await this.folder.reconcile();
+      await folder.whenConnected();
+      const { synced, enrolled } = await folder.reconcile();
       if (synced || enrolled) {
-        new Notice(`Coedit: synced (${synced} reconciled, ${enrolled} enrolled)`);
+        new Notice(`Coedit: "${config.localPath}" synced (${synced} reconciled, ${enrolled} enrolled)`);
       }
     } catch (err) {
-      console.error("coedit: could not sync shared folder", err);
-      new Notice(
-        `Coedit: offline — ${err instanceof Error ? err.message : err}`,
-      );
+      console.error(`coedit: could not sync "${config.localPath}"`, err);
+      new Notice(`Coedit: "${config.localPath}" offline — ${err instanceof Error ? err.message : err}`);
     }
     this.bindings.scan();
+    return folder;
+  }
+
+  /** Reject shares that nest inside (or swallow) an existing share. */
+  private overlapsExisting(path: string): SharedFolderConfig | undefined {
+    return this.settings.sharedFolders.find(
+      (c) => c.localPath === path || isUnder(c.localPath, path) || isUnder(path, c.localPath),
+    );
   }
 
   private async shareFolder(folderPath: string): Promise<void> {
-    if (this.settings.sharedFolder) {
-      new Notice("Coedit: a folder is already shared; unlink it first in settings.");
+    const clash = this.overlapsExisting(folderPath);
+    if (clash) {
+      new Notice(`Coedit: "${folderPath}" overlaps the existing share "${clash.localPath}".`);
       return;
     }
     if (!this.app.vault.getFolderByPath(folderPath)) {
@@ -185,7 +218,7 @@ export default class CoeditPlugin extends Plugin {
       return;
     }
     const config: SharedFolderConfig = { localPath: folderPath, folderId: crypto.randomUUID() };
-    this.settings.sharedFolder = config;
+    this.settings.sharedFolders.push(config);
     await this.saveSettings();
     await this.openFolder(config);
     await navigator.clipboard.writeText(config.folderId);
@@ -193,37 +226,49 @@ export default class CoeditPlugin extends Plugin {
   }
 
   private async joinFolder(folderId: string, localPath: string): Promise<void> {
-    if (this.settings.sharedFolder) {
-      new Notice("Coedit: a folder is already shared; unlink it first in settings.");
+    const clash = this.overlapsExisting(localPath);
+    if (clash) {
+      new Notice(`Coedit: "${localPath}" overlaps the existing share "${clash.localPath}".`);
+      return;
+    }
+    if (this.settings.sharedFolders.some((c) => c.folderId === folderId)) {
+      new Notice("Coedit: that folder ID is already joined.");
       return;
     }
     if (!this.app.vault.getFolderByPath(localPath)) {
       await this.app.vault.createFolder(localPath);
     }
     const config: SharedFolderConfig = { localPath, folderId };
-    this.settings.sharedFolder = config;
+    this.settings.sharedFolders.push(config);
     await this.saveSettings();
     await this.openFolder(config);
   }
 
   private wireStatus(folder: SharedFolder): void {
     const provider = folder.provider;
-    const refresh = () => {
-      if (this.folder !== folder) return;
-      if (!provider.wsconnected) {
-        this.setStatus(provider.wsconnecting ? "connecting…" : "offline");
-        return;
-      }
-      const peers = provider.awareness.getStates().size - 1;
-      this.setStatus(`connected · ${peers} peer${peers === 1 ? "" : "s"} online`);
-    };
     provider.on("status", () => {
-      refresh();
+      this.refreshStatus();
       // Back online: retry editors that declined to bind while offline.
       if (provider.wsconnected) this.bindings.scan();
     });
-    provider.awareness.on("change", refresh);
-    refresh();
+    provider.awareness.on("change", () => this.refreshStatus());
+    this.refreshStatus();
+  }
+
+  refreshStatus(): void {
+    if (this.folders.length === 0) {
+      this.setStatus("idle");
+      return;
+    }
+    const connected = this.folders.filter((f) => f.provider.wsconnected);
+    if (connected.length === 0) {
+      const connecting = this.folders.some((f) => f.provider.wsconnecting);
+      this.setStatus(connecting ? "connecting…" : "offline");
+      return;
+    }
+    const peers = Math.max(...connected.map((f) => f.provider.awareness.getStates().size - 1));
+    const scope = connected.length === this.folders.length ? "connected" : `${connected.length}/${this.folders.length} connected`;
+    this.setStatus(`${scope} · ${peers} peer${peers === 1 ? "" : "s"} online`);
   }
 
   private setStatus(text: string): void {

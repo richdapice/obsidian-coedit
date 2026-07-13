@@ -13,14 +13,14 @@ export interface CoeditSettings {
   serverHost: string;
   token: string;
   displayName: string;
-  sharedFolder: SharedFolderConfig | null;
+  sharedFolders: SharedFolderConfig[];
 }
 
 export const DEFAULT_SETTINGS: CoeditSettings = {
   serverHost: "localhost:8787",
   token: "",
   displayName: "",
-  sharedFolder: null,
+  sharedFolders: [],
 };
 
 export class CoeditSettingTab extends PluginSettingTab {
@@ -77,11 +77,16 @@ export class CoeditSettingTab extends PluginSettingTab {
           .onChange(update((v) => (this.plugin.settings.displayName = v))),
       );
 
-    const folder = this.plugin.settings.sharedFolder;
-    if (folder) {
+    new Setting(containerEl).setName("Shared folders").setHeading();
+    if (this.plugin.settings.sharedFolders.length === 0) {
       new Setting(containerEl)
-        .setName("Shared folder")
-        .setDesc(`"${folder.localPath}" — ID ${folder.folderId}`)
+        .setName("None yet")
+        .setDesc("Use the “Share folder…” or “Join shared folder…” command to add one.");
+    }
+    for (const folder of this.plugin.settings.sharedFolders) {
+      new Setting(containerEl)
+        .setName(folder.localPath)
+        .setDesc(`ID ${folder.folderId}`)
         .addButton((btn) =>
           btn.setButtonText("Copy ID").onClick(() => {
             void navigator.clipboard.writeText(folder.folderId);
@@ -92,16 +97,14 @@ export class CoeditSettingTab extends PluginSettingTab {
             .setButtonText("Unlink")
             .setWarning()
             .onClick(async () => {
-              this.plugin.settings.sharedFolder = null;
+              this.plugin.settings.sharedFolders = this.plugin.settings.sharedFolders.filter(
+                (f) => f !== folder,
+              );
               await this.plugin.saveSettings();
               this.plugin.restartSession();
               this.display();
             }),
         );
-    } else {
-      new Setting(containerEl)
-        .setName("Shared folder")
-        .setDesc("None yet — use the “Share folder” or “Join shared folder” command.");
     }
   }
 }

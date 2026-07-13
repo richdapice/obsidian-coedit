@@ -6,10 +6,13 @@ import { whenSynced } from "./collab";
 import { applyDiskDiff, mergeTypedEdits } from "./disk-sync";
 import type CoeditPlugin from "./main";
 import { contentHash } from "./paths";
+import type { SharedFolder } from "./shared-folder";
 
 interface BindToken {
   guid: string;
   path: string;
+  /** The folder session this binding belongs to (release must hit the same DocManager). */
+  folder: SharedFolder;
   /** True once the binding is installed and owns a connect() ref. */
   active: boolean;
 }
@@ -35,18 +38,18 @@ export class EditorBindingManager {
 
   /** Reconcile every markdown editor with what it should be bound to. */
   scan(): void {
-    const folder = this.plugin.folder;
     for (const leaf of this.plugin.app.workspace.getLeavesOfType("markdown")) {
       const view = leaf.view as MarkdownView;
       const cm = (view.editor as unknown as { cm?: EditorView }).cm;
       const file = view.file;
       if (!cm) continue;
       const token = this.bound.get(cm);
-      const meta = file && folder?.contains(file.path) ? folder.metaFor(file.path) : undefined;
-      if (meta && file) {
-        if (token?.guid !== meta.guid) {
+      const folder = file ? this.plugin.folderFor(file.path) : undefined;
+      const meta = file && folder ? folder.metaFor(file.path) : undefined;
+      if (meta && file && folder) {
+        if (token?.guid !== meta.guid || token.folder !== folder) {
           if (token) this.detach(cm);
-          void this.attach(cm, meta.guid, file.path);
+          void this.attach(cm, folder, meta.guid, file.path);
         }
       } else if (token) {
         this.detach(cm);
@@ -62,13 +65,16 @@ export class EditorBindingManager {
     }
   }
 
-  private async attach(cm: EditorView, guid: string, path: string): Promise<void> {
-    const folder = this.plugin.folder;
-    if (!folder) return;
-    const token: BindToken = { guid, path, active: false };
+  private async attach(
+    cm: EditorView,
+    folder: SharedFolder,
+    guid: string,
+    path: string,
+  ): Promise<void> {
+    const token: BindToken = { guid, path, folder, active: false };
     this.bound.set(cm, token);
 
-    const stale = () => this.bound.get(cm) !== token || this.plugin.folder !== folder;
+    const stale = () => this.bound.get(cm) !== token || !this.plugin.folders.includes(folder);
 
     // Load the locally persisted doc; nothing to release yet if we bail.
     const entry = folder.docs.get(guid);
@@ -156,7 +162,9 @@ export class EditorBindingManager {
     if (!token) return;
     this.bound.delete(cm);
     // Pending attaches own their ref and release it themselves.
-    if (token.active) this.plugin.folder?.docs.release(token.guid);
+    if (token.active && this.plugin.folders.includes(token.folder)) {
+      token.folder.docs.release(token.guid);
+    }
     cm.dispatch({ effects: this.compartment.reconfigure([]) });
   }
 }
