@@ -96,6 +96,15 @@ export class SharedFolder {
     return this.files.get(this.rel(vaultPath));
   }
 
+  /** Public path helpers for presence/follow features. */
+  relPath(vaultPath: string): string {
+    return this.rel(vaultPath);
+  }
+
+  absPath(relPath: string): string {
+    return this.abs(relPath);
+  }
+
   private transact(fn: () => void): void {
     this.doc.transact(fn, LOCAL);
   }

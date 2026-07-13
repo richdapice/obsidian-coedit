@@ -2,6 +2,7 @@ import { Notice, Plugin, TFile } from "obsidian";
 import { EditorBindingManager } from "./editor-binding";
 import { JoinFolderModal, ShareFolderModal } from "./modals";
 import { isUnder } from "./paths";
+import { jumpToPeer, PeerSuggestModal, PresenceManager } from "./presence";
 import {
   DEFAULT_SETTINGS,
   type CoeditSettings,
@@ -17,6 +18,7 @@ export default class CoeditPlugin extends Plugin {
 
   private applier!: VaultApplier;
   private bindings!: EditorBindingManager;
+  private presence!: PresenceManager;
   private statusEl: HTMLElement | null = null;
   /** guid → hash at which disk and CRDT last agreed. Persisted with settings. */
   private syncState: Record<string, string> = {};
@@ -31,6 +33,7 @@ export default class CoeditPlugin extends Plugin {
     await this.loadSettings();
     this.applier = new VaultApplier(this.app);
     this.bindings = new EditorBindingManager(this);
+    this.presence = new PresenceManager(this);
     this.addSettingTab(new CoeditSettingTab(this.app, this));
     this.registerEditorExtension(this.bindings.extension());
     this.statusEl = this.addStatusBarItem();
@@ -52,6 +55,20 @@ export default class CoeditPlugin extends Plugin {
         new JoinFolderModal(this.app, (folderId, localPath) =>
           void this.joinFolder(folderId, localPath),
         ).open();
+      },
+    });
+    this.addCommand({
+      id: "jump-to-collaborator",
+      name: "Jump to collaborator",
+      callback: () => {
+        const peers = this.presence.peerLocations();
+        if (peers.length === 0) {
+          new Notice("Coedit: no one else has a shared file open right now.");
+        } else if (peers.length === 1) {
+          void jumpToPeer(this, peers[0]);
+        } else {
+          new PeerSuggestModal(this, peers, (peer) => void jumpToPeer(this, peer)).open();
+        }
       },
     });
 
@@ -110,14 +127,25 @@ export default class CoeditPlugin extends Plugin {
           if (folder) void folder.onLocalModify(file);
         }),
       );
-      this.registerEvent(this.app.workspace.on("file-open", () => this.bindings.scan()));
-      this.registerEvent(this.app.workspace.on("layout-change", () => this.bindings.scan()));
+      this.registerEvent(
+        this.app.workspace.on("file-open", () => {
+          this.bindings.scan();
+          this.presence.publishActiveFile();
+        }),
+      );
+      this.registerEvent(
+        this.app.workspace.on("layout-change", () => {
+          this.bindings.scan();
+          this.presence.queueRefresh();
+        }),
+      );
 
       void this.openAllFolders();
     });
   }
 
   onunload(): void {
+    this.presence.destroy();
     for (const folder of this.folders) folder.destroy();
     this.folders = [];
     if (this.saveTimer !== null) {
@@ -251,7 +279,11 @@ export default class CoeditPlugin extends Plugin {
       // Back online: retry editors that declined to bind while offline.
       if (provider.wsconnected) this.bindings.scan();
     });
-    provider.awareness.on("change", () => this.refreshStatus());
+    provider.awareness.on("change", () => {
+      this.refreshStatus();
+      this.presence.queueRefresh();
+    });
+    this.presence.publishActiveFile();
     this.refreshStatus();
   }
 
