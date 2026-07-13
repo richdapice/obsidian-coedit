@@ -45,6 +45,38 @@ export async function pushDocState(
   if (res.status !== 204) throw new Error(`push ${room}: HTTP ${res.status}`);
 }
 
+export interface CheckpointInfo {
+  ts: number;
+  bytes: number;
+}
+
+export async function listCheckpoints(
+  settings: CoeditSettings,
+  room: string,
+): Promise<CheckpointInfo[]> {
+  const url = docUrl(settings, room).replace("/as-update?", "/checkpoints?");
+  const res = await requestUrl({ url, throw: false });
+  if (res.status !== 200) throw new Error(`list checkpoints ${room}: HTTP ${res.status}`);
+  return res.json as CheckpointInfo[];
+}
+
+export async function createCheckpoint(settings: CoeditSettings, room: string): Promise<void> {
+  const url = docUrl(settings, room).replace("/as-update?", "/checkpoints?");
+  const res = await requestUrl({ url, method: "POST", throw: false });
+  if (res.status !== 200) throw new Error(`checkpoint ${room}: HTTP ${res.status}`);
+}
+
+export async function pullCheckpoint(
+  settings: CoeditSettings,
+  room: string,
+  ts: number,
+): Promise<Uint8Array> {
+  const url = docUrl(settings, room).replace("/as-update?", `/checkpoints/${ts}?`);
+  const res = await requestUrl({ url, throw: false });
+  if (res.status !== 200) throw new Error(`pull checkpoint ${room}@${ts}: HTTP ${res.status}`);
+  return new Uint8Array(res.arrayBuffer);
+}
+
 function blobUrl(settings: CoeditSettings, sha: string): string {
   const scheme = isLocalHost(settings.serverHost) ? "http" : "https";
   return `${scheme}://${settings.serverHost}/blobs/${sha}?token=${encodeURIComponent(settings.token)}`;

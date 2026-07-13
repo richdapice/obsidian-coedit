@@ -368,6 +368,41 @@ export class SharedFolder {
     }
   }
 
+  /**
+   * Set a doc's text to an older version AS AN EDIT (history preserved, no
+   * doc replacement), propagate it, and update disk/index bookkeeping.
+   */
+  async restoreText(relPath: string, meta: FileMeta, text: string): Promise<void> {
+    await this.docs.withLock(meta.guid, async () => {
+      const entry = this.docs.get(meta.guid);
+      await entry.ready;
+      try {
+        await this.docs.pull(meta.guid);
+      } catch (err) {
+        console.warn(`coedit: pull before restore failed for ${relPath}`, err);
+      }
+      applyDiskDiff(entry.doc, entry.ytext, text);
+      await this.docs.push(meta.guid).catch((err) => {
+        console.warn(`coedit: push after restore failed for ${relPath}`, err);
+      });
+      const finalText = entry.ytext.toString();
+      const finalHash = contentHash(finalText);
+      if (this.docs.isOpen(meta.guid)) {
+        // The binding streams the change into the editor; Obsidian saves.
+        entry.lastAgreedText = finalText;
+      } else {
+        await this.applier.writeFile(this.abs(relPath), finalText);
+      }
+      this.syncState.set(meta.guid, finalHash);
+      const current = this.files.get(relPath);
+      if (current?.guid === meta.guid && current.hash !== finalHash) {
+        this.transact(() =>
+          this.files.set(relPath, { ...current, hash: finalHash, mtime: Date.now() }),
+        );
+      }
+    });
+  }
+
   // ---- local vault events → index map
 
   async onLocalCreate(file: TAbstractFile): Promise<void> {

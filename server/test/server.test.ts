@@ -158,3 +158,53 @@ describe("blobs", () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe("checkpoints", () => {
+  it("creates, lists, and serves checkpoints", async () => {
+    const room = "room-ckpt";
+    const id = env.YDocServer.idFromName(room);
+    const stub = env.YDocServer.get(id);
+    await SELF.fetch(`${BASE}/${room}/as-update?token=test-secret`);
+    await runInDurableObject(stub, async (instance: YDocServer) => {
+      instance.document.getText("contents").insert(0, "version one");
+    });
+
+    const created = await SELF.fetch(`${BASE}/${room}/checkpoints?token=test-secret`, {
+      method: "POST",
+    });
+    expect(created.status).toBe(200);
+    const { ts } = (await created.json()) as { ts: number };
+
+    await runInDurableObject(stub, async (instance: YDocServer) => {
+      const t = instance.document.getText("contents");
+      t.delete(0, t.length);
+      t.insert(0, "version two");
+    });
+
+    const listRes = await SELF.fetch(`${BASE}/${room}/checkpoints?token=test-secret`);
+    const list = (await listRes.json()) as Array<{ ts: number; bytes: number }>;
+    expect(list.map((c) => c.ts)).toContain(ts);
+
+    const ckpt = await SELF.fetch(`${BASE}/${room}/checkpoints/${ts}?token=test-secret`);
+    expect(ckpt.status).toBe(200);
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, new Uint8Array(await ckpt.arrayBuffer()));
+    expect(doc.getText("contents").toString()).toBe("version one");
+  });
+
+  it("auto-checkpoints on save but respects the interval", async () => {
+    const room = "room-ckpt-auto";
+    const id = env.YDocServer.idFromName(room);
+    const stub = env.YDocServer.get(id);
+    await SELF.fetch(`${BASE}/${room}/as-update?token=test-secret`);
+    await runInDurableObject(stub, async (instance: YDocServer) => {
+      instance.document.getText("contents").insert(0, "a");
+      await instance.onSave();
+      instance.document.getText("contents").insert(0, "b");
+      await instance.onSave();
+    });
+    const listRes = await SELF.fetch(`${BASE}/${room}/checkpoints?token=test-secret`);
+    const list = (await listRes.json()) as unknown[];
+    expect(list.length).toBe(1);
+  });
+});

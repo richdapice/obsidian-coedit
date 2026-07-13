@@ -13,6 +13,17 @@ const MAX_PUSH_BYTES = 8 * 1024 * 1024;
 
 const chunkKey = (i: number) => `${SNAPSHOT_PREFIX}${String(i).padStart(6, "0")}`;
 
+// Version-history checkpoints: full snapshots under zero-padded-ms keys so
+// list() returns them oldest-first.
+const CKPT_PREFIX = "ckpt:";
+const CKPT_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const CKPT_MAX_COUNT = 40;
+// A checkpoint is one storage value; docs bigger than this just skip history.
+const CKPT_MAX_BYTES = 2 * 1024 * 1024 - 1024;
+
+const ckptKey = (ts: number) => `${CKPT_PREFIX}${String(ts).padStart(15, "0")}`;
+const ckptTs = (key: string) => Number(key.slice(CKPT_PREFIX.length));
+
 export class YDocServer extends YServer<Env> {
   static options = { hibernate: true };
 
@@ -50,6 +61,30 @@ export class YDocServer extends YServer<Env> {
     const stale = [...existing.keys()].filter((k) => k >= chunkKey(count));
     if (stale.length > 0) await this.ctx.storage.delete(stale);
     await this.ctx.storage.delete(LEGACY_SNAPSHOT_KEY);
+    await this.maybeCheckpoint();
+  }
+
+  /** Auto-checkpoint at most every CKPT_INTERVAL_MS. */
+  private async maybeCheckpoint(): Promise<void> {
+    const keys = await this.ctx.storage.list({ prefix: CKPT_PREFIX });
+    const latest = [...keys.keys()].pop();
+    if (latest && Date.now() - ckptTs(latest) < CKPT_INTERVAL_MS) return;
+    await this.checkpointNow();
+  }
+
+  private async checkpointNow(): Promise<number | null> {
+    const update = Y.encodeStateAsUpdate(this.document);
+    if (update.byteLength > CKPT_MAX_BYTES) {
+      console.warn(`checkpoint skipped for "${this.name}": ${update.byteLength} bytes`);
+      return null;
+    }
+    const ts = Date.now();
+    await this.ctx.storage.put(ckptKey(ts), update);
+    const keys = [...(await this.ctx.storage.list({ prefix: CKPT_PREFIX })).keys()];
+    if (keys.length > CKPT_MAX_COUNT) {
+      await this.ctx.storage.delete(keys.slice(0, keys.length - CKPT_MAX_COUNT));
+    }
+    return ts;
   }
 
   // Background sync in the plugin pulls and pushes doc state over plain HTTP
@@ -76,6 +111,32 @@ export class YDocServer extends YServer<Env> {
         return new Response(null, { status: 204 });
       }
     }
+
+    if (url.pathname.endsWith("/checkpoints")) {
+      if (request.method === "GET") {
+        const stored = await this.ctx.storage.list<Uint8Array>({ prefix: CKPT_PREFIX });
+        const list = [...stored.entries()].map(([key, value]) => ({
+          ts: ckptTs(key),
+          bytes: value.byteLength,
+        }));
+        return Response.json(list);
+      }
+      if (request.method === "POST") {
+        const ts = await this.checkpointNow();
+        if (ts === null) return new Response("doc too large to checkpoint", { status: 413 });
+        return Response.json({ ts });
+      }
+    }
+
+    const ckptMatch = url.pathname.match(/\/checkpoints\/(\d+)$/);
+    if (ckptMatch && request.method === "GET") {
+      const update = await this.ctx.storage.get<Uint8Array>(ckptKey(Number(ckptMatch[1])));
+      if (!update) return new Response("not found", { status: 404 });
+      return new Response(update as Uint8Array<ArrayBuffer>, {
+        headers: { "content-type": "application/octet-stream" },
+      });
+    }
+
     return new Response("not found", { status: 404 });
   }
 }

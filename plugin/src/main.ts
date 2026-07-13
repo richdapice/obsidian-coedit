@@ -3,6 +3,7 @@ import { EditorBindingManager } from "./editor-binding";
 import { JoinFolderModal, ShareFolderModal } from "./modals";
 import { isUnder } from "./paths";
 import { jumpToPeer, PeerSuggestModal, PresenceManager } from "./presence";
+import { showVersionHistory } from "./version-history";
 import {
   DEFAULT_SETTINGS,
   type CoeditSettings,
@@ -55,6 +56,20 @@ export default class CoeditPlugin extends Plugin {
         new JoinFolderModal(this.app, (folderId, localPath) =>
           void this.joinFolder(folderId, localPath),
         ).open();
+      },
+    });
+    this.addCommand({
+      id: "version-history",
+      name: "Version history for current note",
+      callback: () => {
+        const file = this.app.workspace.getActiveFile();
+        const folder = file ? this.folderFor(file.path) : undefined;
+        const meta = file && folder ? folder.metaFor(file.path) : undefined;
+        if (!file || !folder || !meta || meta.kind === "blob") {
+          new Notice("Coedit: the active note isn't in a shared folder.");
+          return;
+        }
+        void showVersionHistory(this, folder, folder.relPath(file.path), meta);
       },
     });
     this.addCommand({
