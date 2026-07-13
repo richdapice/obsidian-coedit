@@ -14,6 +14,12 @@ export interface DocEntry {
   refs: number;
   /** Resolves once the locally persisted (IndexedDB) state is loaded. */
   ready: Promise<void>;
+  /**
+   * Last text at which disk and CRDT agreed while the doc was open. Base for
+   * fuzzy-merging edits that bypass the bound editor (reading-view checkbox
+   * taps, other plugins writing the file).
+   */
+  lastAgreedText?: string;
 }
 
 /**

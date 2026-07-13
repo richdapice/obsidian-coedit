@@ -3,7 +3,7 @@ import { IndexeddbPersistence } from "y-indexeddb";
 import type YProvider from "y-partyserver/provider";
 import * as Y from "yjs";
 import { createProvider, whenSynced } from "./collab";
-import { applyDiskDiff } from "./disk-sync";
+import { applyDiskDiff, mergeTypedEdits } from "./disk-sync";
 import { DocManager } from "./doc-manager";
 import { roomName } from "./net";
 import {
@@ -335,22 +335,40 @@ export class SharedFolder {
 
   /**
    * Obsidian saved a file — its own autosave for open editors, or an edit
-   * from elsewhere. For open files the binding already synced the CRDT: just
-   * publish the hash. For closed files run the full pipeline.
+   * from elsewhere. For open files, edits normally arrive through the bound
+   * editor and the save just confirms agreement; edits that bypassed the
+   * editor (reading-view checkbox taps, other plugins writing the file) are
+   * fuzzy-merged into the live doc so they reach peers instantly over the
+   * open WebSocket. Closed files run the full pipeline.
    */
   async onLocalModify(file: TFile): Promise<void> {
     if (this.applier.consumeModify(file.path)) return;
     const rel = this.rel(file.path);
     const meta = this.files.get(rel);
     if (!meta) return;
-    const content = await this.vault.cachedRead(file);
-    const hash = contentHash(content);
-    if (hash === meta.hash) return;
 
     if (this.docs.isOpen(meta.guid)) {
-      this.syncState.set(meta.guid, hash);
-      this.transact(() => this.files.set(rel, { ...meta, hash, mtime: file.stat.mtime }));
+      await this.docs.withLock(meta.guid, async () => {
+        const content = await this.vault.cachedRead(file);
+        const entry = this.docs.get(meta.guid);
+        if (entry.ytext.toString() !== content) {
+          // The change bypassed the editor. Merge it against the last
+          // agreed base so concurrent remote edits in ytext survive; the
+          // binding then propagates the merged text back into the editor.
+          mergeTypedEdits(entry.doc, entry.ytext, entry.lastAgreedText ?? content, content);
+        }
+        const finalText = entry.ytext.toString();
+        const hash = contentHash(finalText);
+        if (finalText === content) entry.lastAgreedText = content;
+        this.syncState.set(meta.guid, hash);
+        const current = this.files.get(rel);
+        if (current?.guid === meta.guid && current.hash !== hash) {
+          this.transact(() => this.files.set(rel, { ...current, hash, mtime: file.stat.mtime }));
+        }
+      });
     } else {
+      const content = await this.vault.cachedRead(file);
+      if (contentHash(content) === meta.hash) return;
       await this.syncClosedFile(rel, meta);
     }
   }

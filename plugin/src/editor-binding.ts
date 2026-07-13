@@ -144,6 +144,7 @@ export class EditorBindingManager {
     }
 
     const target = entry.ytext.toString();
+    entry.lastAgreedText = target;
     token.active = true;
     cm.dispatch({
       ...(target !== typedText
