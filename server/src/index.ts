@@ -1,4 +1,5 @@
-import { routePartykitRequest } from "partyserver";
+import { marked } from "marked";
+import { getServerByName, routePartykitRequest } from "partyserver";
 import { YServer } from "y-partyserver";
 import * as Y from "yjs";
 
@@ -186,8 +187,69 @@ async function handleBlob(request: Request, env: Env, key: string): Promise<Resp
   return new Response("method not allowed", { status: 405 });
 }
 
+// Public read-only rendering of a published note. The URL carries an HMAC of
+// the room (signed with SHARED_SECRET, minted by the plugin), so the link
+// itself is the capability — no registry, no revocation (rotate the secret
+// to kill all links).
+const PUBLISH_SIG_CHARS = 16;
+
+async function hmacHex(secret: string, message: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(message));
+  return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function handlePublished(env: Env, roomB64: string, sig: string): Promise<Response> {
+  let room: string;
+  try {
+    room = atob(roomB64.replace(/-/g, "+").replace(/_/g, "/"));
+  } catch {
+    return new Response("not found", { status: 404 });
+  }
+  const expected = (await hmacHex(env.SHARED_SECRET, `publish:${room}`)).slice(0, PUBLISH_SIG_CHARS);
+  if (!timingSafeEqual(sig, expected)) return new Response("not found", { status: 404 });
+
+  const stub = await getServerByName(env.YDocServer, room);
+  const res = await stub.fetch(
+    new Request(`https://do/parties/y-doc-server/${encodeURIComponent(room)}/as-update`),
+  );
+  if (res.status !== 200) return new Response("not found", { status: 404 });
+  const doc = new Y.Doc();
+  Y.applyUpdate(doc, new Uint8Array(await res.arrayBuffer()));
+  const text = doc.getText("contents").toString();
+
+  // Neutralize raw HTML before markdown parsing; markdown syntax survives.
+  const escaped = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const body = marked.parse(escaped, { async: false });
+  const title = (text.match(/^#\s+(.+)$/m)?.[1] ?? "Shared note").slice(0, 120);
+  const html = `<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>${title.replace(/</g, "&lt;")}</title>
+<style>
+body{max-width:42rem;margin:2rem auto;padding:0 1rem;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.6;color:#1a1a1a;background:#fff}
+@media(prefers-color-scheme:dark){body{color:#ddd;background:#191919}a{color:#8ab4f8}}
+pre,code{background:rgba(128,128,128,.15);border-radius:4px;padding:.1em .3em}
+pre{padding:.8em;overflow-x:auto}
+blockquote{border-left:3px solid rgba(128,128,128,.4);margin-left:0;padding-left:1em;opacity:.85}
+</style></head><body>${body}</body></html>`;
+  return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    const publishMatch = new URL(request.url).pathname.match(
+      /^\/p\/([A-Za-z0-9_-]+)\.([a-f0-9]{16})$/,
+    );
+    if (publishMatch && request.method === "GET") {
+      return handlePublished(env, publishMatch[1], publishMatch[2]);
+    }
     const blobMatch = new URL(request.url).pathname.match(/^\/blobs\/([a-f0-9]{64})$/);
     if (blobMatch) {
       const auth = checkToken(request, env);

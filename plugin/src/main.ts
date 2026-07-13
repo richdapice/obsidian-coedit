@@ -1,7 +1,8 @@
 import { Notice, Plugin, TFile } from "obsidian";
 import { EditorBindingManager } from "./editor-binding";
 import { JoinFolderModal, ShareFolderModal } from "./modals";
-import { isUnder } from "./paths";
+import { isLocalHost, roomName } from "./net";
+import { base64UrlEncode, hmacHex, isUnder } from "./paths";
 import { jumpToPeer, PeerSuggestModal, PresenceManager } from "./presence";
 import { showVersionHistory } from "./version-history";
 import {
@@ -70,6 +71,27 @@ export default class CoeditPlugin extends Plugin {
           return;
         }
         void showVersionHistory(this, folder, folder.relPath(file.path), meta);
+      },
+    });
+    this.addCommand({
+      id: "copy-public-link",
+      name: "Copy public link for current note",
+      callback: () => {
+        void (async () => {
+          const file = this.app.workspace.getActiveFile();
+          const folder = file ? this.folderFor(file.path) : undefined;
+          const meta = file && folder ? folder.metaFor(file.path) : undefined;
+          if (!file || !folder || !meta || meta.kind === "blob") {
+            new Notice("Coedit: the active note isn't in a shared folder.");
+            return;
+          }
+          const room = roomName(folder.config.folderId, meta.guid);
+          const sig = (await hmacHex(this.settings.token, `publish:${room}`)).slice(0, 16);
+          const scheme = isLocalHost(this.settings.serverHost) ? "http" : "https";
+          const url = `${scheme}://${this.settings.serverHost}/p/${base64UrlEncode(room)}.${sig}`;
+          await navigator.clipboard.writeText(url);
+          new Notice("Coedit: public link copied. Anyone with the link can read this note.");
+        })();
       },
     });
     this.addCommand({

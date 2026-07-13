@@ -208,3 +208,41 @@ describe("checkpoints", () => {
     expect(list.length).toBe(1);
   });
 });
+
+describe("publish", () => {
+  async function hmacHex(secret: string, message: string): Promise<string> {
+    const key = await crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(secret),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"],
+    );
+    const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(message));
+    return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+  const b64url = (s: string) => btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+
+  it("renders a published note with a valid signature", async () => {
+    const room = "pub-room";
+    const src = new Y.Doc();
+    src.getText("contents").insert(0, "# Family Recipes\n\n**Pasta** is <script>alert(1)</script> great.\n");
+    await SELF.fetch(`${BASE}/${room}/as-update?token=test-secret`, {
+      method: "POST",
+      body: Y.encodeStateAsUpdate(src) as Uint8Array<ArrayBuffer>,
+    });
+
+    const sig = (await hmacHex("test-secret", `publish:${room}`)).slice(0, 16);
+    const res = await SELF.fetch(`https://example.com/p/${b64url(room)}.${sig}`);
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("<strong>Pasta</strong>");
+    expect(html).toContain("Family Recipes");
+    expect(html).not.toContain("<script>alert");
+  });
+
+  it("404s a bad signature", async () => {
+    const res = await SELF.fetch(`https://example.com/p/${b64url("pub-room")}.${"0".repeat(16)}`);
+    expect(res.status).toBe(404);
+  });
+});
