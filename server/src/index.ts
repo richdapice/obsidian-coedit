@@ -129,6 +129,28 @@ export class YDocServer extends YServer<Env> {
       }
     }
 
+    return this.handleCheckpointFetch(url, request);
+  }
+
+  /**
+   * Read-only WebSocket enforcement. The edge (onBeforeConnect) already
+   * verified the token's HMAC — inside the DO we only parse the signed
+   * scope back out of the upgrade URL, which hibernation preserves.
+   */
+  override isReadOnly(connection: { uri: string | null }): boolean {
+    const uri = connection.uri;
+    if (!uri) return true;
+    let token: string;
+    try {
+      token = new URL(uri, "https://do").searchParams.get("token") ?? "";
+    } catch {
+      return true;
+    }
+    if (this.env.SHARED_SECRET && timingSafeEqual(token, this.env.SHARED_SECRET)) return false;
+    return token.split(".")[2] !== "rw";
+  }
+
+  private async handleCheckpointFetch(url: URL, request: Request): Promise<Response> {
     const ckptMatch = url.pathname.match(/\/checkpoints\/(\d+)$/);
     if (ckptMatch && request.method === "GET") {
       const update = await this.ctx.storage.get<Uint8Array>(ckptKey(Number(ckptMatch[1])));
@@ -142,10 +164,42 @@ export class YDocServer extends YServer<Env> {
   }
 }
 
-function checkToken(request: Request, env: Env): Request | Response {
+// Invite tokens: `b64url(name).expiryMs.scope.sig` where sig is the first 32
+// hex chars of HMAC(secret, "invite:<name-b64>:<expiry>:<scope>"). Verified
+// at the edge; the signed scope is then trusted inside the DO. No revocation
+// list — tokens expire, and rotating the secret kills everything at once.
+interface AuthResult {
+  scope: "rw" | "ro";
+}
+
+async function verifyInvite(secret: string, token: string): Promise<AuthResult | null> {
+  const parts = token.split(".");
+  if (parts.length !== 4) return null;
+  const [nameB64, expiryStr, scope, sig] = parts;
+  if (scope !== "rw" && scope !== "ro") return null;
+  const expiry = Number(expiryStr);
+  if (!Number.isFinite(expiry) || expiry < Date.now()) return null;
+  const expected = (await hmacHex(secret, `invite:${nameB64}:${expiryStr}:${scope}`)).slice(0, 32);
+  if (!timingSafeEqual(sig, expected)) return null;
+  return { scope };
+}
+
+async function authorize(request: Request, env: Env): Promise<AuthResult | Response> {
   const token = new URL(request.url).searchParams.get("token") ?? "";
-  if (!env.SHARED_SECRET || !timingSafeEqual(token, env.SHARED_SECRET)) {
-    return new Response("unauthorized", { status: 403 });
+  if (!env.SHARED_SECRET) return new Response("unauthorized", { status: 403 });
+  if (timingSafeEqual(token, env.SHARED_SECRET)) return { scope: "rw" };
+  const invite = await verifyInvite(env.SHARED_SECRET, token);
+  if (invite) return invite;
+  return new Response("unauthorized", { status: 403 });
+}
+
+const READ_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+
+async function checkToken(request: Request, env: Env): Promise<Request | Response> {
+  const auth = await authorize(request, env);
+  if (auth instanceof Response) return auth;
+  if (auth.scope === "ro" && !READ_METHODS.has(request.method)) {
+    return new Response("read-only token", { status: 403 });
   }
   return request;
 }
@@ -252,7 +306,7 @@ export default {
     }
     const blobMatch = new URL(request.url).pathname.match(/^\/blobs\/([a-f0-9]{64})$/);
     if (blobMatch) {
-      const auth = checkToken(request, env);
+      const auth = await checkToken(request, env);
       if (auth instanceof Response) return auth;
       return handleBlob(request, env, blobMatch[1]);
     }

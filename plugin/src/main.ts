@@ -3,7 +3,7 @@ import { Notice, Plugin, TFile } from "obsidian";
 import { userIdentity } from "./collab";
 import { addComment, CommentModal } from "./comments";
 import { EditorBindingManager } from "./editor-binding";
-import { JoinFolderModal, ShareFolderModal } from "./modals";
+import { InviteModal, JoinFolderModal, ShareFolderModal } from "./modals";
 import { isLocalHost, roomName } from "./net";
 import { base64UrlEncode, hmacHex, isUnder } from "./paths";
 import { jumpToPeer, PeerSuggestModal, PresenceManager } from "./presence";
@@ -74,6 +74,27 @@ export default class CoeditPlugin extends Plugin {
           return;
         }
         void showVersionHistory(this, folder, folder.relPath(file.path), meta);
+      },
+    });
+    this.addCommand({
+      id: "create-invite",
+      name: "Create invite token…",
+      callback: () => {
+        new InviteModal(this.app, (name, days, readOnly) => {
+          void (async () => {
+            const scope = readOnly ? "ro" : "rw";
+            const nameB64 = base64UrlEncode(name);
+            const expiry = Date.now() + days * 86_400_000;
+            const sig = (
+              await hmacHex(this.settings.token, `invite:${nameB64}:${expiry}:${scope}`)
+            ).slice(0, 32);
+            const token = `${nameB64}.${expiry}.${scope}.${sig}`;
+            await navigator.clipboard.writeText(token);
+            new Notice(
+              `Coedit: invite for ${name} copied (${scope}, ${days}d). They paste it as their Shared secret.`,
+            );
+          })();
+        }).open();
       },
     });
     this.addCommand({

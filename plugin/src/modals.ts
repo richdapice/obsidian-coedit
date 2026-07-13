@@ -37,6 +37,54 @@ export class ShareFolderModal extends Modal {
   }
 }
 
+export class InviteModal extends Modal {
+  private name = "";
+  private days = 90;
+  private readOnly = false;
+
+  constructor(
+    app: App,
+    private onSubmit: (name: string, days: number, readOnly: boolean) => void,
+  ) {
+    super(app);
+  }
+
+  onOpen(): void {
+    this.setTitle("Create invite token");
+    this.contentEl.createEl("p", {
+      text: "Only works if your Shared secret is the server's real secret (not another invite token).",
+      cls: "setting-item-description",
+    });
+    new Setting(this.contentEl)
+      .setName("Name")
+      .setDesc("Who this token is for (helps you track them).")
+      .addText((text) => text.onChange((v) => (this.name = v.trim())));
+    new Setting(this.contentEl)
+      .setName("Valid for (days)")
+      .addText((text) =>
+        text.setValue("90").onChange((v) => (this.days = Math.max(1, Number(v) || 90))),
+      );
+    new Setting(this.contentEl)
+      .setName("Read-only")
+      .setDesc("They can view live but not edit.")
+      .addToggle((toggle) => toggle.onChange((v) => (this.readOnly = v)));
+    new Setting(this.contentEl).addButton((btn) =>
+      btn
+        .setButtonText("Create & copy")
+        .setCta()
+        .onClick(() => {
+          if (!this.name) return;
+          this.close();
+          this.onSubmit(this.name, this.days, this.readOnly);
+        }),
+    );
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+  }
+}
+
 export class JoinFolderModal extends Modal {
   private folderId = "";
   private localPath = "";

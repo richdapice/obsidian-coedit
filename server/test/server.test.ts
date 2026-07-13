@@ -246,3 +246,66 @@ describe("publish", () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe("invite tokens", () => {
+  async function hmac32(secret: string, message: string): Promise<string> {
+    const key = await crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(secret),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"],
+    );
+    const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(message));
+    return [...new Uint8Array(sig)]
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("")
+      .slice(0, 32);
+  }
+  const b64url = (s: string) => btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+
+  async function makeInvite(name: string, scope: string, expiry: number): Promise<string> {
+    const nameB64 = b64url(name);
+    const sig = await hmac32("test-secret", `invite:${nameB64}:${expiry}:${scope}`);
+    return `${nameB64}.${expiry}.${scope}.${sig}`;
+  }
+
+  it("accepts a valid rw invite for reads and writes", async () => {
+    const token = await makeInvite("wife", "rw", Date.now() + 86400_000);
+    const src = new Y.Doc();
+    src.getText("contents").insert(0, "invited write");
+    const post = await SELF.fetch(`${BASE}/room-inv/as-update?token=${token}`, {
+      method: "POST",
+      body: Y.encodeStateAsUpdate(src) as Uint8Array<ArrayBuffer>,
+    });
+    expect(post.status).toBe(204);
+    const get = await SELF.fetch(`${BASE}/room-inv/as-update?token=${token}`);
+    expect(get.status).toBe(200);
+  });
+
+  it("read-only invites can read but not write", async () => {
+    const token = await makeInvite("guest", "ro", Date.now() + 86400_000);
+    const get = await SELF.fetch(`${BASE}/room-inv/as-update?token=${token}`);
+    expect(get.status).toBe(200);
+    const src = new Y.Doc();
+    src.getText("contents").insert(0, "sneaky");
+    const post = await SELF.fetch(`${BASE}/room-inv/as-update?token=${token}`, {
+      method: "POST",
+      body: Y.encodeStateAsUpdate(src) as Uint8Array<ArrayBuffer>,
+    });
+    expect(post.status).toBe(403);
+  });
+
+  it("rejects expired invites", async () => {
+    const token = await makeInvite("late", "rw", Date.now() - 1000);
+    const res = await SELF.fetch(`${BASE}/room-inv/as-update?token=${token}`);
+    expect(res.status).toBe(403);
+  });
+
+  it("rejects scope tampering", async () => {
+    const roToken = await makeInvite("guest2", "ro", Date.now() + 86400_000);
+    const forged = roToken.replace(".ro.", ".rw.");
+    const res = await SELF.fetch(`${BASE}/room-inv/as-update?token=${forged}`);
+    expect(res.status).toBe(403);
+  });
+});
