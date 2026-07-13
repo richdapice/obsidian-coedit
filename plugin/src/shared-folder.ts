@@ -8,8 +8,10 @@ import { DocManager } from "./doc-manager";
 import { pullBlob, pushBlob, roomName } from "./net";
 import {
   classifyMapDelta,
+  classifyOpenModify,
   contentHash,
   type FileMeta,
+  isReadOnlyToken,
   isUnder,
   joinPath,
   sha256Hex,
@@ -189,9 +191,10 @@ export class SharedFolder {
       const finalHash = contentHash(finalText);
       const advertised = this.files.get(relPath);
       if (
-        folded ||
-        this.pendingPush.has(meta.guid) ||
-        (pulled && advertised?.guid === meta.guid && advertised.hash !== finalHash)
+        !isReadOnlyToken(this.getSettings().token) &&
+        (folded ||
+          this.pendingPush.has(meta.guid) ||
+          (pulled && advertised?.guid === meta.guid && advertised.hash !== finalHash))
       ) {
         try {
           await this.docs.push(meta.guid);
@@ -255,7 +258,7 @@ export class SharedFolder {
   }
 
   /** Enroll local files the index doesn't know about (sharer's first run, or files created while the plugin was off). */
-  private async enrollMissing(): Promise<number> {
+  async enrollMissing(): Promise<number> {
     const files = this.vault
       .getFiles()
       .filter((f) => this.contains(f.path) && !this.files.has(this.rel(f.path)));
@@ -400,6 +403,7 @@ export class SharedFolder {
           this.files.set(relPath, { ...current, hash: finalHash, mtime: Date.now() }),
         );
       }
+      this.docs.evictIfClosed(meta.guid);
     });
   }
 
@@ -442,6 +446,15 @@ export class SharedFolder {
       const meta = this.files.get(toRelative(this.config.localPath, oldPath));
       if (!meta) {
         await this.onLocalCreate(file);
+        return;
+      }
+      // Renames across the .md boundary change how the file syncs (CRDT doc
+      // vs LWW blob): retire the old entry and enroll fresh under a new guid.
+      const wantsDoc = file.extension === "md";
+      const isDoc = meta.kind !== "blob";
+      if (wantsDoc !== isDoc) {
+        this.transact(() => this.files.delete(toRelative(this.config.localPath, oldPath)));
+        await this.enroll(file);
         return;
       }
       this.transact(() => {
@@ -493,16 +506,29 @@ export class SharedFolder {
       await this.docs.withLock(meta.guid, async () => {
         const content = await this.vault.cachedRead(file);
         const entry = this.docs.get(meta.guid);
-        if (entry.ytext.toString() !== content) {
-          // The change bypassed the editor. Merge it against the last
-          // agreed base so concurrent remote edits in ytext survive; the
-          // binding then propagates the merged text back into the editor.
+        const kind = classifyOpenModify(
+          contentHash(content),
+          contentHash(entry.ytext.toString()),
+          entry.recentTextHashes,
+        );
+        // A stale autosave echo already lives in the CRDT; merging it again
+        // would duplicate the delta for every peer. Ignore it — a fresher
+        // save follows.
+        if (kind === "stale-echo") return;
+        if (kind === "bypass") {
+          // Written around the editor (checkbox tap, other plugin). Merge
+          // against the last agreed base; the binding streams the merged
+          // text back into the editor and Obsidian re-saves it.
           mergeTypedEdits(entry.doc, entry.ytext, entry.lastAgreedText ?? content, content);
         }
         const finalText = entry.ytext.toString();
         const hash = contentHash(finalText);
-        if (finalText === content) entry.lastAgreedText = content;
-        this.syncState.set(meta.guid, hash);
+        if (finalText === content) {
+          entry.lastAgreedText = content;
+          // Only record sync state for what is REALLY on disk — recording
+          // ytext's hash while disk differs poisons the next startup fold.
+          this.syncState.set(meta.guid, hash);
+        }
         const current = this.files.get(rel);
         if (current?.guid === meta.guid && current.hash !== hash) {
           this.transact(() => this.files.set(rel, { ...current, hash, mtime: file.stat.mtime }));

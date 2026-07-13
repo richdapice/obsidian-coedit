@@ -65,11 +65,14 @@ export class YDocServer extends YServer<Env> {
     await this.maybeCheckpoint();
   }
 
-  /** Auto-checkpoint at most every CKPT_INTERVAL_MS. */
+  /**
+   * Auto-checkpoint at most every CKPT_INTERVAL_MS. The latest timestamp
+   * lives in its own key: list({prefix}) materializes every checkpoint's
+   * bytes, far too heavy for a per-save check.
+   */
   private async maybeCheckpoint(): Promise<void> {
-    const keys = await this.ctx.storage.list({ prefix: CKPT_PREFIX });
-    const latest = [...keys.keys()].pop();
-    if (latest && Date.now() - ckptTs(latest) < CKPT_INTERVAL_MS) return;
+    const latest = await this.ctx.storage.get<number>("ckptLatestTs");
+    if (latest && Date.now() - latest < CKPT_INTERVAL_MS) return;
     await this.checkpointNow();
   }
 
@@ -80,7 +83,7 @@ export class YDocServer extends YServer<Env> {
       return null;
     }
     const ts = Date.now();
-    await this.ctx.storage.put(ckptKey(ts), update);
+    await this.ctx.storage.put({ [ckptKey(ts)]: update, ckptLatestTs: ts });
     const keys = [...(await this.ctx.storage.list({ prefix: CKPT_PREFIX })).keys()];
     if (keys.length > CKPT_MAX_COUNT) {
       await this.ctx.storage.delete(keys.slice(0, keys.length - CKPT_MAX_COUNT));
@@ -260,6 +263,7 @@ async function hmacHex(secret: string, message: string): Promise<string> {
 }
 
 async function handlePublished(env: Env, roomB64: string, sig: string): Promise<Response> {
+  if (!env.SHARED_SECRET) return new Response("not found", { status: 404 });
   let room: string;
   try {
     room = atob(roomB64.replace(/-/g, "+").replace(/_/g, "/"));
@@ -293,7 +297,15 @@ pre,code{background:rgba(128,128,128,.15);border-radius:4px;padding:.1em .3em}
 pre{padding:.8em;overflow-x:auto}
 blockquote{border-left:3px solid rgba(128,128,128,.4);margin-left:0;padding-left:1em;opacity:.85}
 </style></head><body>${body}</body></html>`;
-  return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
+  return new Response(html, {
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      // Blocks javascript: links and any script execution on this origin
+      // (marked doesn't sanitize URL schemes).
+      "content-security-policy":
+        "default-src 'none'; style-src 'unsafe-inline'; img-src https: data:",
+    },
+  });
 }
 
 export default {

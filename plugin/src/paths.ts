@@ -29,7 +29,46 @@ export async function hmacHex(secret: string, message: string): Promise<string> 
 }
 
 export function base64UrlEncode(s: string): string {
-  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  // UTF-8 first: btoa throws on code points outside Latin-1.
+  const bytes = new TextEncoder().encode(s);
+  return btoa(String.fromCharCode(...bytes))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
+/** Invite tokens are `name.expiry.scope.sig`; the master secret has no dots. */
+export function isInviteToken(token: string): boolean {
+  return token.split(".").length === 4;
+}
+
+export function isReadOnlyToken(token: string): boolean {
+  const parts = token.split(".");
+  return parts.length === 4 && parts[2] === "ro";
+}
+
+export type OpenModifyKind =
+  /** Disk equals the CRDT — a clean autosave. */
+  | "in-sync"
+  /** Disk is an older state the editor stream already produced; ignore it. */
+  | "stale-echo"
+  /** Disk was written around the editor (checkbox tap, other plugin): merge it. */
+  | "bypass";
+
+/**
+ * Classify a modify event for an OPEN (editor-bound) file. Merging a stale
+ * autosave echo would re-apply deltas the CRDT already contains and
+ * duplicate text for every peer, so anything matching a recently observed
+ * ytext state must be ignored, not merged.
+ */
+export function classifyOpenModify(
+  diskHash: string,
+  ytextHash: string,
+  recentYtextHashes: readonly string[],
+): OpenModifyKind {
+  if (diskHash === ytextHash) return "in-sync";
+  if (recentYtextHashes.includes(diskHash)) return "stale-echo";
+  return "bypass";
 }
 
 /** cyrb53 — cheap 53-bit content hash for change detection, not crypto. */

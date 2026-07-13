@@ -46,7 +46,9 @@ export class EditorBindingManager {
       if (!cm) continue;
       const token = this.bound.get(cm);
       const folder = file ? this.plugin.folderFor(file.path) : undefined;
-      const meta = file && folder ? folder.metaFor(file.path) : undefined;
+      let meta = file && folder ? folder.metaFor(file.path) : undefined;
+      // Blobs are LWW binaries, not CRDT docs — never bind an editor to one.
+      if (meta?.kind === "blob") meta = undefined;
       if (meta && file && folder) {
         if (token?.guid !== meta.guid || token.folder !== folder) {
           if (token) this.detach(cm);

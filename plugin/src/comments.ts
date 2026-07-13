@@ -26,6 +26,11 @@ export interface CommentRecord {
 
 const commentsChanged = Annotation.define<boolean>();
 
+/** Comment records sync from peers — never inject their color into CSS unvalidated. */
+function safeColor(color: string): string {
+  return /^#[0-9a-fA-F]{3,8}$/.test(color) ? color : "var(--text-accent)";
+}
+
 function commentsMap(entry: DocEntry): Y.Map<CommentRecord> {
   return entry.doc.getMap<CommentRecord>("comments");
 }
@@ -121,7 +126,7 @@ export function commentsExtension(entry: DocEntry): Extension {
             Math.min(r.to, docLen),
             Decoration.mark({
               class: "coedit-comment",
-              attributes: { style: `text-decoration-color: ${r.color}` },
+              attributes: { style: `text-decoration-color: ${safeColor(r.color)}` },
             }),
           );
         }
@@ -146,7 +151,8 @@ export function commentsExtension(entry: DocEntry): Extension {
         for (const c of hits) {
           const item = dom.createDiv({ cls: "coedit-comment-item" });
           const head = item.createDiv({ cls: "coedit-comment-head" });
-          head.createSpan({ text: c.author, cls: "coedit-comment-author" }).style.color = c.color;
+          head.createSpan({ text: c.author, cls: "coedit-comment-author" }).style.color =
+            safeColor(c.color);
           head.createSpan({
             text: new Date(c.createdAt).toLocaleString(),
             cls: "coedit-comment-time",

@@ -1,11 +1,11 @@
 import type { EditorView } from "@codemirror/view";
-import { Notice, Plugin, TFile } from "obsidian";
+import { Notice, Plugin, TFile, TFolder, normalizePath } from "obsidian";
 import { userIdentity } from "./collab";
 import { addComment, CommentModal } from "./comments";
 import { EditorBindingManager } from "./editor-binding";
 import { InviteModal, JoinFolderModal, ShareFolderModal } from "./modals";
 import { isLocalHost, roomName } from "./net";
-import { base64UrlEncode, hmacHex, isUnder } from "./paths";
+import { base64UrlEncode, hmacHex, isInviteToken, isReadOnlyToken, isUnder } from "./paths";
 import { jumpToPeer, PeerSuggestModal, PresenceManager } from "./presence";
 import { showVersionHistory } from "./version-history";
 import {
@@ -80,6 +80,10 @@ export default class CoeditPlugin extends Plugin {
       id: "create-invite",
       name: "Create invite token…",
       callback: () => {
+        if (isInviteToken(this.settings.token)) {
+          new Notice("Coedit: invites can only be minted with the server's real shared secret.");
+          return;
+        }
         new InviteModal(this.app, (name, days, readOnly) => {
           void (async () => {
             const scope = readOnly ? "ro" : "rw";
@@ -130,6 +134,10 @@ export default class CoeditPlugin extends Plugin {
           const meta = file && folder ? folder.metaFor(file.path) : undefined;
           if (!file || !folder || !meta || meta.kind === "blob") {
             new Notice("Coedit: the active note isn't in a shared folder.");
+            return;
+          }
+          if (isInviteToken(this.settings.token)) {
+            new Notice("Coedit: public links can only be minted with the server's real shared secret.");
             return;
           }
           const room = roomName(folder.config.folderId, meta.guid);
@@ -183,9 +191,14 @@ export default class CoeditPlugin extends Plugin {
             void from.onLocalRename(file, oldPath);
           } else {
             // Crossing a share boundary (or entering/leaving one) is a
-            // delete on one side and a create on the other.
+            // delete on one side and a create on the other. A moved FOLDER
+            // enrolls all its files (onLocalCreate only handles TFiles).
             if (from) from.onLocalDelete(file, oldPath);
-            if (to) void to.onLocalCreate(file).then(() => this.bindings.scan());
+            if (to) {
+              const enroll =
+                file instanceof TFolder ? to.enrollMissing() : to.onLocalCreate(file);
+              void enroll.then(() => this.bindings.scan());
+            }
           }
           this.bindings.scan();
         }),
@@ -275,6 +288,12 @@ export default class CoeditPlugin extends Plugin {
   }
 
   private async openAllFolders(): Promise<void> {
+    if (this.settings.sharedFolders.length > 0 && isReadOnlyToken(this.settings.token)) {
+      new Notice(
+        "Coedit: your token is read-only — you can view live changes, but edits you make will NOT sync to others.",
+        10000,
+      );
+    }
     await Promise.all(this.settings.sharedFolders.map((config) => this.openFolder(config)));
     this.refreshStatus();
   }
@@ -312,14 +331,17 @@ export default class CoeditPlugin extends Plugin {
     return folder;
   }
 
-  /** Reject shares that nest inside (or swallow) an existing share. */
+  /** Reject shares that nest inside (or swallow) an existing share. Case-insensitive: macOS/Windows filesystems usually are. */
   private overlapsExisting(path: string): SharedFolderConfig | undefined {
-    return this.settings.sharedFolders.find(
-      (c) => c.localPath === path || isUnder(c.localPath, path) || isUnder(path, c.localPath),
-    );
+    const lower = path.toLowerCase();
+    return this.settings.sharedFolders.find((c) => {
+      const existing = c.localPath.toLowerCase();
+      return existing === lower || isUnder(existing, lower) || isUnder(lower, existing);
+    });
   }
 
   private async shareFolder(folderPath: string): Promise<void> {
+    folderPath = normalizePath(folderPath);
     const clash = this.overlapsExisting(folderPath);
     if (clash) {
       new Notice(`Coedit: "${folderPath}" overlaps the existing share "${clash.localPath}".`);
@@ -338,6 +360,7 @@ export default class CoeditPlugin extends Plugin {
   }
 
   private async joinFolder(folderId: string, localPath: string): Promise<void> {
+    localPath = normalizePath(localPath);
     const clash = this.overlapsExisting(localPath);
     if (clash) {
       new Notice(`Coedit: "${localPath}" overlaps the existing share "${clash.localPath}".`);

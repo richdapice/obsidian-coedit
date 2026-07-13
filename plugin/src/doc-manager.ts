@@ -3,6 +3,7 @@ import type YProvider from "y-partyserver/provider";
 import * as Y from "yjs";
 import { createProvider } from "./collab";
 import { pullDocState, pushDocState, roomName } from "./net";
+import { contentHash } from "./paths";
 import type { CoeditSettings } from "./settings";
 
 export interface DocEntry {
@@ -20,7 +21,17 @@ export interface DocEntry {
    * taps, other plugins writing the file).
    */
   lastAgreedText?: string;
+  /**
+   * Hashes of recent ytext states while connected. Lets the modify handler
+   * recognize a stale autosave echo (already-applied deltas) and skip it
+   * instead of re-merging it into the CRDT.
+   */
+  recentTextHashes: string[];
+  /** Doc-update observer feeding recentTextHashes; active while connected. */
+  historyObserver?: () => void;
 }
+
+const RECENT_HASHES_MAX = 64;
 
 /**
  * Per-file Y.Docs, keyed by guid, each persisted to IndexedDB so offline
@@ -69,6 +80,7 @@ export class DocManager {
         provider: null,
         refs: 0,
         ready: idb.whenSynced.then(() => undefined),
+        recentTextHashes: [],
       };
       this.entries.set(guid, entry);
     }
@@ -82,6 +94,17 @@ export class DocManager {
     if (!entry.provider) {
       entry.provider = createProvider(this.getSettings(), roomName(this.folderId, guid), entry.doc);
     }
+    if (!entry.historyObserver) {
+      const record = () => {
+        entry.recentTextHashes.push(contentHash(entry.ytext.toString()));
+        if (entry.recentTextHashes.length > RECENT_HASHES_MAX) {
+          entry.recentTextHashes.splice(0, entry.recentTextHashes.length - RECENT_HASHES_MAX);
+        }
+      };
+      record();
+      entry.doc.on("update", record);
+      entry.historyObserver = record;
+    }
     return entry;
   }
 
@@ -90,9 +113,16 @@ export class DocManager {
     const entry = this.entries.get(guid);
     if (!entry || entry.refs === 0) return;
     entry.refs--;
-    if (entry.refs === 0 && entry.provider) {
-      entry.provider.destroy();
-      entry.provider = null;
+    if (entry.refs === 0) {
+      if (entry.provider) {
+        entry.provider.destroy();
+        entry.provider = null;
+      }
+      if (entry.historyObserver) {
+        entry.doc.off("update", entry.historyObserver);
+        entry.historyObserver = undefined;
+        entry.recentTextHashes = [];
+      }
     }
   }
 
