@@ -18,7 +18,7 @@ for name in alice bob; do
   vault="$root/dev/vaults/$name"
   plugdir="$vault/.obsidian/plugins/coedit"
   mkdir -p "$plugdir"
-  cp "$plugin/main.js" "$plugin/manifest.json" "$plugdir/"
+  cp "$plugin/main.js" "$plugin/manifest.json" "$plugin/styles.css" "$plugdir/"
   echo '["coedit"]' > "$vault/.obsidian/community-plugins.json"
   cat > "$plugdir/data.json" <<EOF
 {
