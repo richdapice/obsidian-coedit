@@ -114,3 +114,47 @@ describe("persistence", () => {
     expect(text).toBe("from the old format");
   });
 });
+
+describe("blobs", () => {
+  const HASH = "a".repeat(64);
+  const BLOB = "https://example.com/blobs";
+
+  it("rejects unauthenticated blob access", async () => {
+    const res = await SELF.fetch(`${BLOB}/${HASH}?token=nope`, { method: "GET" });
+    expect(res.status).toBe(403);
+  });
+
+  it("round-trips a blob and is idempotent on re-upload", async () => {
+    const bytes = new TextEncoder().encode("fake image bytes");
+    const put = await SELF.fetch(`${BLOB}/${HASH}?token=test-secret`, {
+      method: "PUT",
+      body: bytes as Uint8Array<ArrayBuffer>,
+      headers: { "content-length": String(bytes.byteLength) },
+    });
+    expect(put.status).toBe(204);
+
+    const again = await SELF.fetch(`${BLOB}/${HASH}?token=test-secret`, {
+      method: "PUT",
+      body: bytes as Uint8Array<ArrayBuffer>,
+      headers: { "content-length": String(bytes.byteLength) },
+    });
+    expect(again.status).toBe(204);
+
+    const head = await SELF.fetch(`${BLOB}/${HASH}?token=test-secret`, { method: "HEAD" });
+    expect(head.status).toBe(204);
+
+    const got = await SELF.fetch(`${BLOB}/${HASH}?token=test-secret`);
+    expect(got.status).toBe(200);
+    expect(new Uint8Array(await got.arrayBuffer())).toEqual(bytes);
+  });
+
+  it("404s a missing blob", async () => {
+    const res = await SELF.fetch(`${BLOB}/${"b".repeat(64)}?token=test-secret`);
+    expect(res.status).toBe(404);
+  });
+
+  it("rejects malformed hashes at the router", async () => {
+    const res = await SELF.fetch(`${BLOB}/not-a-hash?token=test-secret`);
+    expect(res.status).toBe(404);
+  });
+});

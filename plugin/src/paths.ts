@@ -2,8 +2,17 @@
 
 export interface FileMeta {
   guid: string;
+  /** Docs: cyrb53 of the text. Blobs: SHA-256 hex of the bytes (R2 key). */
   hash: string;
   mtime: number;
+  /** Absent means "doc" (markdown CRDT); "blob" is a content-addressed binary. */
+  kind?: "doc" | "blob";
+}
+
+/** SHA-256 hex — content address for attachment blobs. */
+export async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 /** cyrb53 — cheap 53-bit content hash for change detection, not crypto. */

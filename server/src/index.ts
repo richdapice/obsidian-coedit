@@ -96,8 +96,43 @@ function timingSafeEqual(a: string, b: string): boolean {
   return crypto.subtle.timingSafeEqual(aBytes, bBytes);
 }
 
+// Content-addressed attachment blobs in R2, keyed by SHA-256. Same-secret
+// trust model: uploads aren't hash-verified server-side.
+const MAX_BLOB_BYTES = 25 * 1024 * 1024;
+
+async function handleBlob(request: Request, env: Env, key: string): Promise<Response> {
+  if (request.method === "GET") {
+    const obj = await env.BLOBS.get(key);
+    if (!obj) return new Response("not found", { status: 404 });
+    return new Response(obj.body, {
+      headers: { "content-type": "application/octet-stream" },
+    });
+  }
+  if (request.method === "HEAD") {
+    return new Response(null, { status: (await env.BLOBS.head(key)) ? 204 : 404 });
+  }
+  if (request.method === "PUT") {
+    const size = Number(request.headers.get("content-length") ?? 0);
+    if (!request.body || size <= 0 || size > MAX_BLOB_BYTES) {
+      return new Response("bad blob size", { status: 400 });
+    }
+    // Content-addressed: an existing key already has these bytes.
+    if (!(await env.BLOBS.head(key))) {
+      await env.BLOBS.put(key, request.body);
+    }
+    return new Response(null, { status: 204 });
+  }
+  return new Response("method not allowed", { status: 405 });
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    const blobMatch = new URL(request.url).pathname.match(/^\/blobs\/([a-f0-9]{64})$/);
+    if (blobMatch) {
+      const auth = checkToken(request, env);
+      if (auth instanceof Response) return auth;
+      return handleBlob(request, env, blobMatch[1]);
+    }
     const response = await routePartykitRequest(request, env, {
       onBeforeConnect: (req) => checkToken(req, env),
       onBeforeRequest: (req) => checkToken(req, env),

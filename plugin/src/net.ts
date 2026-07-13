@@ -44,3 +44,30 @@ export async function pushDocState(
   });
   if (res.status !== 204) throw new Error(`push ${room}: HTTP ${res.status}`);
 }
+
+function blobUrl(settings: CoeditSettings, sha: string): string {
+  const scheme = isLocalHost(settings.serverHost) ? "http" : "https";
+  return `${scheme}://${settings.serverHost}/blobs/${sha}?token=${encodeURIComponent(settings.token)}`;
+}
+
+/** Download an attachment blob by content hash. */
+export async function pullBlob(settings: CoeditSettings, sha: string): Promise<ArrayBuffer> {
+  const res = await requestUrl({ url: blobUrl(settings, sha), throw: false });
+  if (res.status !== 200) throw new Error(`pull blob ${sha.slice(0, 8)}…: HTTP ${res.status}`);
+  return res.arrayBuffer;
+}
+
+/** Upload an attachment blob; idempotent (content-addressed). */
+export async function pushBlob(
+  settings: CoeditSettings,
+  sha: string,
+  bytes: ArrayBuffer,
+): Promise<void> {
+  const res = await requestUrl({
+    url: blobUrl(settings, sha),
+    method: "PUT",
+    body: bytes,
+    throw: false,
+  });
+  if (res.status !== 204) throw new Error(`push blob ${sha.slice(0, 8)}…: HTTP ${res.status}`);
+}

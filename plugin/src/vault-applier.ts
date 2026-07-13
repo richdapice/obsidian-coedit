@@ -56,6 +56,21 @@ export class VaultApplier {
     });
   }
 
+  async writeBinary(path: string, data: ArrayBuffer): Promise<void> {
+    const existing = this.app.vault.getAbstractFileByPath(path);
+    if (existing instanceof TFile) {
+      await this.guarded(this.expectedModifies, path, async () => {
+        await this.app.vault.modifyBinary(existing, data);
+      });
+      return;
+    }
+    const parent = path.split("/").slice(0, -1).join("/");
+    if (parent) await this.ensureFolder(parent);
+    await this.guarded(this.expectedCreates, path, async () => {
+      await this.app.vault.createBinary(path, data);
+    });
+  }
+
   async rename(oldPath: string, newPath: string): Promise<void> {
     const file = this.app.vault.getAbstractFileByPath(oldPath);
     if (!file) return;

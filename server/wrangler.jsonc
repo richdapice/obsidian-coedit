@@ -7,5 +7,6 @@
     "bindings": [{ "name": "YDocServer", "class_name": "YDocServer" }]
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["YDocServer"] }],
+  "r2_buckets": [{ "binding": "BLOBS", "bucket_name": "coedit-blobs" }],
   "observability": { "enabled": true }
 }

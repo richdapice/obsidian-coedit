@@ -5,13 +5,14 @@ import * as Y from "yjs";
 import { createProvider, whenSynced } from "./collab";
 import { applyDiskDiff, mergeTypedEdits } from "./disk-sync";
 import { DocManager } from "./doc-manager";
-import { roomName } from "./net";
+import { pullBlob, pushBlob, roomName } from "./net";
 import {
   classifyMapDelta,
   contentHash,
   type FileMeta,
   isUnder,
   joinPath,
+  sha256Hex,
   toRelative,
 } from "./paths";
 import type { CoeditSettings, SharedFolderConfig } from "./settings";
@@ -19,6 +20,8 @@ import type { VaultApplier } from "./vault-applier";
 
 /** Origin tag for our own index-map transactions. */
 const LOCAL = "coedit-local";
+/** Attachments above this size are skipped (Worker request-body headroom). */
+const MAX_BLOB_BYTES = 25 * 1024 * 1024;
 
 /** Last hash at which disk and CRDT were seen to agree, per guid. */
 export interface SyncStateStore {
@@ -220,9 +223,26 @@ export class SharedFolder {
     const enrolled = await this.enrollMissing();
     let synced = 0;
     for (const [relPath, meta] of [...this.files.entries()]) {
-      if (this.docs.isOpen(meta.guid)) continue; // the editor binding owns it
       const path = this.abs(relPath);
       const af = this.vault.getAbstractFileByPath(path);
+      if (meta.kind === "blob") {
+        if (!(af instanceof TFile)) {
+          await this.syncBlobFromRemote(relPath, meta);
+          synced++;
+        } else {
+          const sha = await sha256Hex(await this.vault.readBinary(af));
+          if (sha === meta.hash) continue;
+          // Binaries can't merge: last writer wins by mtime.
+          if (af.stat.mtime > meta.mtime) {
+            await this.onLocalBlobModify(af, relPath, meta);
+          } else {
+            await this.syncBlobFromRemote(relPath, meta);
+          }
+          synced++;
+        }
+        continue;
+      }
+      if (this.docs.isOpen(meta.guid)) continue; // the editor binding owns it
       if (af instanceof TFile) {
         const last = this.syncState.get(meta.guid);
         const diskHash = contentHash(await this.vault.cachedRead(af));
@@ -234,19 +254,26 @@ export class SharedFolder {
     return { synced, enrolled };
   }
 
-  /** Enroll local markdown files the index doesn't know about (sharer's first run, or files created while the plugin was off). */
+  /** Enroll local files the index doesn't know about (sharer's first run, or files created while the plugin was off). */
   private async enrollMissing(): Promise<number> {
     const files = this.vault
-      .getMarkdownFiles()
+      .getFiles()
       .filter((f) => this.contains(f.path) && !this.files.has(this.rel(f.path)));
+    let enrolled = 0;
     for (const file of files) {
-      await this.enroll(file);
+      if (await this.enroll(file)) enrolled++;
     }
-    return files.length;
+    return enrolled;
+  }
+
+  /** Register a file: markdown becomes a CRDT doc, anything else a blob. */
+  private async enroll(file: TFile): Promise<boolean> {
+    if (file.extension === "md") return this.enrollDoc(file);
+    return this.enrollBlob(file);
   }
 
   /** Seed a content doc from disk and register the file. Creator-seeds rule: only the peer that creates the index entry ever seeds. */
-  private async enroll(file: TFile): Promise<void> {
+  private async enrollDoc(file: TFile): Promise<boolean> {
     const content = await this.vault.cachedRead(file);
     const guid = crypto.randomUUID();
     const entry = this.docs.get(guid);
@@ -263,13 +290,89 @@ export class SharedFolder {
         mtime: file.stat.mtime,
       }),
     );
+    return true;
+  }
+
+  /**
+   * Upload a binary and register it. Registration only happens after a
+   * successful upload so peers never see an entry they can't fetch;
+   * failures retry on the next reconcile.
+   */
+  private async enrollBlob(file: TFile): Promise<boolean> {
+    if (file.stat.size > MAX_BLOB_BYTES) {
+      console.warn(`coedit: ${file.path} exceeds ${MAX_BLOB_BYTES} bytes; not syncing`);
+      return false;
+    }
+    const bytes = await this.vault.readBinary(file);
+    const sha = await sha256Hex(bytes);
+    try {
+      await pushBlob(this.getSettings(), sha, bytes);
+    } catch (err) {
+      console.warn(`coedit: blob upload failed for ${file.path}; will retry next sync`, err);
+      return false;
+    }
+    const guid = crypto.randomUUID();
+    this.syncState.set(guid, sha);
+    this.transact(() =>
+      this.files.set(this.rel(file.path), {
+        guid,
+        hash: sha,
+        mtime: file.stat.mtime,
+        kind: "blob",
+      }),
+    );
+    return true;
+  }
+
+  /** Bring a local binary up to date with the advertised content hash. */
+  private async syncBlobFromRemote(relPath: string, meta: FileMeta): Promise<void> {
+    const path = this.abs(relPath);
+    const af = this.vault.getAbstractFileByPath(path);
+    if (af instanceof TFile) {
+      const sha = await sha256Hex(await this.vault.readBinary(af));
+      if (sha === meta.hash) {
+        this.syncState.set(meta.guid, meta.hash);
+        return;
+      }
+    }
+    try {
+      const bytes = await pullBlob(this.getSettings(), meta.hash);
+      await this.applier.writeBinary(path, bytes);
+      this.syncState.set(meta.guid, meta.hash);
+    } catch (err) {
+      console.warn(`coedit: blob download failed for ${relPath}; will retry next sync`, err);
+    }
+  }
+
+  /** A local binary changed: upload and advertise the new hash. */
+  private async onLocalBlobModify(file: TFile, relPath: string, meta: FileMeta): Promise<void> {
+    if (file.stat.size > MAX_BLOB_BYTES) {
+      console.warn(`coedit: ${file.path} exceeds ${MAX_BLOB_BYTES} bytes; not syncing`);
+      return;
+    }
+    const bytes = await this.vault.readBinary(file);
+    const sha = await sha256Hex(bytes);
+    if (sha === meta.hash) return;
+    try {
+      await pushBlob(this.getSettings(), sha, bytes);
+    } catch (err) {
+      console.warn(`coedit: blob upload failed for ${relPath}; will retry next sync`, err);
+      return;
+    }
+    this.syncState.set(meta.guid, sha);
+    const current = this.files.get(relPath);
+    if (current?.guid === meta.guid) {
+      this.transact(() =>
+        this.files.set(relPath, { ...current, hash: sha, mtime: file.stat.mtime }),
+      );
+    }
   }
 
   // ---- local vault events → index map
 
   async onLocalCreate(file: TAbstractFile): Promise<void> {
     if (this.applier.consumeCreate(file.path)) return;
-    if (!(file instanceof TFile) || file.extension !== "md") return;
+    if (!(file instanceof TFile)) return;
     if (this.files.has(this.rel(file.path))) return;
     await this.enroll(file);
   }
@@ -312,7 +415,7 @@ export class SharedFolder {
       });
     } else if (wasIn) {
       this.transact(() => this.files.delete(toRelative(this.config.localPath, oldPath)));
-    } else if (nowIn && file.extension === "md") {
+    } else if (nowIn) {
       await this.onLocalCreate(file);
     }
   }
@@ -346,6 +449,10 @@ export class SharedFolder {
     const rel = this.rel(file.path);
     const meta = this.files.get(rel);
     if (!meta) return;
+    if (meta.kind === "blob") {
+      await this.onLocalBlobModify(file, rel, meta);
+      return;
+    }
 
     if (this.docs.isOpen(meta.guid)) {
       await this.docs.withLock(meta.guid, async () => {
@@ -385,14 +492,20 @@ export class SharedFolder {
       await this.applier.trash(this.abs(d.path));
     }
     for (const a of [...delta.added, ...delta.updated]) {
+      if (a.meta.kind === "blob") {
+        await this.syncBlobFromRemote(a.path, a.meta);
+        continue;
+      }
       if (this.docs.isOpen(a.meta.guid)) continue; // live via WebSocket
       await this.syncClosedFile(a.path, a.meta);
     }
     // A peer that renamed AND edited offline delivers both in one
     // transaction; the rename above moved the file, now sync its content.
     for (const r of delta.renamed) {
-      if (this.docs.isOpen(r.meta.guid)) continue;
-      if (r.meta.hash !== this.syncState.get(r.meta.guid)) {
+      if (r.meta.hash === this.syncState.get(r.meta.guid)) continue;
+      if (r.meta.kind === "blob") {
+        await this.syncBlobFromRemote(r.to, r.meta);
+      } else if (!this.docs.isOpen(r.meta.guid)) {
         await this.syncClosedFile(r.to, r.meta);
       }
     }

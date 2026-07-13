@@ -97,3 +97,13 @@ describe("classifyMapDelta", () => {
     expect(delta.removed).toEqual([]);
   });
 });
+
+describe("sha256Hex", () => {
+  it("matches a known vector", async () => {
+    const bytes = new TextEncoder().encode("abc");
+    const { sha256Hex } = await import("../src/paths");
+    expect(await sha256Hex(bytes.buffer as ArrayBuffer)).toBe(
+      "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+    );
+  });
+});
