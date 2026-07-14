@@ -1,5 +1,8 @@
-import { FuzzySuggestModal, Notice } from "obsidian";
+import { EditorView } from "@codemirror/view";
+import { FuzzySuggestModal, MarkdownView, Notice } from "obsidian";
+import * as Y from "yjs";
 import type CoeditPlugin from "./main";
+import type { DocEntry } from "./doc-manager";
 import type { SharedFolder } from "./shared-folder";
 
 /** Shape of the file-explorer view's internals we rely on (stable for years, but not public API). */
@@ -119,4 +122,141 @@ export async function jumpToPeer(plugin: CoeditPlugin, peer: PeerLocation): Prom
     return;
   }
   await plugin.app.workspace.getLeaf(false).openFile(file);
+}
+
+/**
+ * Follow a peer: open whatever file they move to and keep their cursor in
+ * view. Event-driven off awareness changes, so it also behaves after mobile
+ * resume, where a one-shot "jump" can sample presence before it arrives.
+ */
+export class FollowManager {
+  private targetName: string | null = null;
+  private cursorCleanup: (() => void) | null = null;
+  private lastOpenedPath: string | null = null;
+  private openTimer: number | null = null;
+
+  constructor(private plugin: CoeditPlugin) {}
+
+  get target(): string | null {
+    return this.targetName;
+  }
+
+  toggle(name: string): void {
+    if (this.targetName) this.stop();
+    else this.start(name);
+  }
+
+  start(name: string): void {
+    this.targetName = name;
+    new Notice(`Coedit: following ${name} — run the command again to stop.`);
+    this.plugin.refreshStatus();
+    this.onPresenceChange();
+  }
+
+  stop(): void {
+    if (!this.targetName) return;
+    new Notice(`Coedit: stopped following ${this.targetName}.`);
+    this.targetName = null;
+    this.lastOpenedPath = null;
+    this.clearCursorWatch();
+    this.plugin.refreshStatus();
+  }
+
+  /** Called on every index-awareness change (and after reconnects). */
+  onPresenceChange(): void {
+    if (!this.targetName) return;
+    const peer = this.plugin.presence
+      .peerLocations()
+      .find((p) => p.name === this.targetName);
+    if (!peer) return; // target idle/offline — keep the subscription alive
+    const active = this.plugin.app.workspace.getActiveFile();
+    if (active?.path === peer.vaultPath) {
+      this.lastOpenedPath = peer.vaultPath;
+      this.watchCursor(peer);
+      return;
+    }
+    if (this.lastOpenedPath === peer.vaultPath) return; // already opening it
+    // Debounce: a peer flicking through files shouldn't thrash our workspace.
+    if (this.openTimer !== null) window.clearTimeout(this.openTimer);
+    this.openTimer = window.setTimeout(() => {
+      this.openTimer = null;
+      void this.openPeerFile(peer);
+    }, 300);
+  }
+
+  /** Providers are being torn down (settings change/unlink). */
+  onSessionRestart(): void {
+    this.clearCursorWatch();
+    this.lastOpenedPath = null;
+  }
+
+  destroy(): void {
+    this.clearCursorWatch();
+    if (this.openTimer !== null) window.clearTimeout(this.openTimer);
+    this.targetName = null;
+  }
+
+  private async openPeerFile(peer: PeerLocation): Promise<void> {
+    if (this.targetName !== peer.name) return;
+    const file = this.plugin.app.vault.getFileByPath(peer.vaultPath);
+    if (!file) return; // not materialized locally yet; next change retries
+    this.lastOpenedPath = peer.vaultPath;
+    await this.plugin.app.workspace.getLeaf(false).openFile(file);
+    this.watchCursor(peer);
+  }
+
+  /** Subscribe to the file doc's awareness so their cursor keeps us scrolled. */
+  private watchCursor(peer: PeerLocation, attempt = 0): void {
+    if (this.targetName !== peer.name) return;
+    const meta = peer.folder.metaFor(peer.vaultPath);
+    if (!meta || meta.kind === "blob") return;
+    // The editor binding connects the doc shortly after the file opens.
+    if (!peer.folder.docs.isOpen(meta.guid)) {
+      if (attempt < 12) window.setTimeout(() => this.watchCursor(peer, attempt + 1), 400);
+      return;
+    }
+    const entry = peer.folder.docs.get(meta.guid);
+    const awareness = entry.provider?.awareness;
+    if (!awareness) {
+      if (attempt < 12) window.setTimeout(() => this.watchCursor(peer, attempt + 1), 400);
+      return;
+    }
+    this.clearCursorWatch();
+    const listener = () => this.scrollToPeerCursor(entry, awareness);
+    awareness.on("change", listener);
+    this.cursorCleanup = () => awareness.off("change", listener);
+    listener();
+  }
+
+  private scrollToPeerCursor(
+    entry: DocEntry,
+    awareness: { clientID: number; getStates(): Map<number, unknown> },
+  ): void {
+    if (!this.targetName) return;
+    for (const [clientId, state] of awareness.getStates()) {
+      if (clientId === awareness.clientID) continue;
+      const s = state as {
+        user?: { name?: string };
+        cursor?: { head?: unknown } | null;
+      };
+      if (s.user?.name !== this.targetName || !s.cursor?.head) continue;
+      try {
+        const rel = Y.createRelativePositionFromJSON(s.cursor.head);
+        const abs = Y.createAbsolutePositionFromRelativePosition(rel, entry.doc);
+        if (!abs) return;
+        const view = this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
+        const cm = (view?.editor as unknown as { cm?: EditorView } | undefined)?.cm;
+        if (!cm || abs.index > cm.state.doc.length) return;
+        cm.dispatch({ effects: EditorView.scrollIntoView(abs.index, { y: "center" }) });
+      } catch {
+        // Anchor didn't resolve (stale state); the next change retries.
+      }
+      return;
+    }
+  }
+
+  private clearCursorWatch(): void {
+    this.cursorCleanup?.();
+    this.cursorCleanup = null;
+  }
 }

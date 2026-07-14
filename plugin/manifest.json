@@ -1,7 +1,7 @@
 {
   "id": "coedit",
   "name": "Coedit",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "minAppVersion": "1.5.0",
   "description": "Real-time collaborative editing of shared folders, backed by a self-hosted Cloudflare Durable Objects server.",
   "author": "Rich Dapice",

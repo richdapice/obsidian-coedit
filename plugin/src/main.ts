@@ -6,7 +6,7 @@ import { EditorBindingManager } from "./editor-binding";
 import { InviteModal, JoinFolderModal, ShareFolderModal } from "./modals";
 import { isLocalHost, roomName } from "./net";
 import { base64UrlEncode, hmacHex, isInviteToken, isReadOnlyToken, isUnder } from "./paths";
-import { jumpToPeer, PeerSuggestModal, PresenceManager } from "./presence";
+import { FollowManager, jumpToPeer, PeerSuggestModal, PresenceManager } from "./presence";
 import { showVersionHistory } from "./version-history";
 import {
   DEFAULT_SETTINGS,
@@ -21,9 +21,11 @@ export default class CoeditPlugin extends Plugin {
   settings: CoeditSettings = DEFAULT_SETTINGS;
   folders: SharedFolder[] = [];
 
+  presence!: PresenceManager;
+  follow!: FollowManager;
+
   private applier!: VaultApplier;
   private bindings!: EditorBindingManager;
-  private presence!: PresenceManager;
   private statusEl: HTMLElement | null = null;
   /** guid → hash at which disk and CRDT last agreed. Persisted with settings. */
   private syncState: Record<string, string> = {};
@@ -39,6 +41,7 @@ export default class CoeditPlugin extends Plugin {
     this.applier = new VaultApplier(this.app);
     this.bindings = new EditorBindingManager(this);
     this.presence = new PresenceManager(this);
+    this.follow = new FollowManager(this);
     this.addSettingTab(new CoeditSettingTab(this.app, this));
     this.registerEditorExtension(this.bindings.extension());
     this.statusEl = this.addStatusBarItem();
@@ -155,11 +158,37 @@ export default class CoeditPlugin extends Plugin {
       callback: () => {
         const peers = this.presence.peerLocations();
         if (peers.length === 0) {
-          new Notice("Coedit: no one else has a shared file open right now.");
+          new Notice(
+            this.folders.some((f) => f.provider.wsconnected)
+              ? "Coedit: no one else has a shared file open right now (presence can take a few seconds after reconnecting)."
+              : "Coedit: offline — can't see collaborators.",
+          );
         } else if (peers.length === 1) {
           void jumpToPeer(this, peers[0]);
         } else {
           new PeerSuggestModal(this, peers, (peer) => void jumpToPeer(this, peer)).open();
+        }
+      },
+    });
+    this.addCommand({
+      id: "follow-collaborator",
+      name: "Follow collaborator (toggle)",
+      callback: () => {
+        if (this.follow.target) {
+          this.follow.stop();
+          return;
+        }
+        const peers = this.presence.peerLocations();
+        if (peers.length === 0) {
+          new Notice(
+            this.folders.some((f) => f.provider.wsconnected)
+              ? "Coedit: no one to follow right now (presence can take a few seconds after reconnecting)."
+              : "Coedit: offline — can't see collaborators.",
+          );
+        } else if (peers.length === 1) {
+          this.follow.start(peers[0].name);
+        } else {
+          new PeerSuggestModal(this, peers, (peer) => this.follow.start(peer.name)).open();
         }
       },
     });
@@ -242,6 +271,7 @@ export default class CoeditPlugin extends Plugin {
   }
 
   onunload(): void {
+    this.follow.destroy();
     this.presence.destroy();
     for (const folder of this.folders) folder.destroy();
     this.folders = [];
@@ -280,6 +310,7 @@ export default class CoeditPlugin extends Plugin {
 
   /** Tear everything down and reconnect (settings changed, unlink, etc.). */
   restartSession(): void {
+    this.follow.onSessionRestart();
     this.bindings.detachAll();
     for (const folder of this.folders) folder.destroy();
     this.folders = [];
@@ -389,6 +420,7 @@ export default class CoeditPlugin extends Plugin {
     provider.awareness.on("change", () => {
       this.refreshStatus();
       this.presence.queueRefresh();
+      this.follow.onPresenceChange();
     });
     this.presence.publishActiveFile();
     this.refreshStatus();
@@ -407,7 +439,8 @@ export default class CoeditPlugin extends Plugin {
     }
     const peers = Math.max(...connected.map((f) => f.provider.awareness.getStates().size - 1));
     const scope = connected.length === this.folders.length ? "connected" : `${connected.length}/${this.folders.length} connected`;
-    this.setStatus(`${scope} · ${peers} peer${peers === 1 ? "" : "s"} online`);
+    const following = this.follow?.target ? ` · following ${this.follow.target}` : "";
+    this.setStatus(`${scope} · ${peers} peer${peers === 1 ? "" : "s"} online${following}`);
   }
 
   private setStatus(text: string): void {
