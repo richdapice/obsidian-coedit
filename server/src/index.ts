@@ -1,6 +1,11 @@
 import * as encoding from "lib0/encoding";
 import { marked } from "marked";
-import { getServerByName, routePartykitRequest } from "partyserver";
+import {
+  type Connection,
+  type ConnectionContext,
+  getServerByName,
+  routePartykitRequest,
+} from "partyserver";
 import { YServer } from "y-partyserver";
 import * as Y from "yjs";
 
@@ -28,6 +33,8 @@ const ckptTs = (key: string) => Number(key.slice(CKPT_PREFIX.length));
 
 /** y-protocols message type: ask a client to re-send its awareness state. */
 const MESSAGE_QUERY_AWARENESS = 3;
+/** Ghost-peer sweep cadence: how often to poke sockets while any exist. */
+const SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 
 export class YDocServer extends YServer<Env> {
   static options = { hibernate: true };
@@ -38,6 +45,27 @@ export class YDocServer extends YServer<Env> {
     // renewal interval (so DOs can hibernate). After a hibernation wake the
     // store is empty and idle peers stay invisible to anyone who connects
     // later — ask every surviving socket to re-announce itself.
+    this.queryAwareness();
+    await this.scheduleSweep();
+  }
+
+  override async onConnect(connection: Connection, ctx: ConnectionContext): Promise<void> {
+    await super.onConnect(connection, ctx);
+    await this.scheduleSweep();
+  }
+
+  /**
+   * Periodic sweep while sockets exist: writing to a silently-dead
+   * connection (force-killed app, dropped network) is what forces TCP to
+   * discover the death, which fires the close handler, which removes the
+   * ghost's awareness states. Live clients just re-announce themselves.
+   */
+  override async onAlarm(): Promise<void> {
+    this.queryAwareness();
+    await this.scheduleSweep();
+  }
+
+  private queryAwareness(): void {
     const encoder = encoding.createEncoder();
     encoding.writeVarUint(encoder, MESSAGE_QUERY_AWARENESS);
     const message = encoding.toUint8Array(encoder);
@@ -47,6 +75,14 @@ export class YDocServer extends YServer<Env> {
       } catch {
         // Socket already closing; its awareness is gone anyway.
       }
+    }
+  }
+
+  private async scheduleSweep(): Promise<void> {
+    if ([...this.getConnections()].length === 0) return; // hibernate in peace
+    const existing = await this.ctx.storage.getAlarm();
+    if (existing === null) {
+      await this.ctx.storage.setAlarm(Date.now() + SWEEP_INTERVAL_MS);
     }
   }
 

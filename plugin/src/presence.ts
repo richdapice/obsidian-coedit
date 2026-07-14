@@ -36,9 +36,13 @@ export class PresenceManager {
     }
   }
 
-  /** Everyone else's current file, across all folders. */
+  /**
+   * Everyone else's current file, across all folders. Deduped by display
+   * name: a force-killed app leaves a ghost connection behind until the
+   * server sweep reaps it, and the same person shouldn't show twice.
+   */
   peerLocations(): PeerLocation[] {
-    const peers: PeerLocation[] = [];
+    const byName = new Map<string, PeerLocation>();
     for (const folder of this.plugin.folders) {
       const awareness = folder.provider.awareness;
       for (const [clientId, state] of awareness.getStates()) {
@@ -46,7 +50,7 @@ export class PresenceManager {
         const user = (state as { user?: { name?: string; color?: string } }).user;
         const rel = (state as { activeFile?: string | null }).activeFile;
         if (!user?.name || !rel) continue;
-        peers.push({
+        byName.set(user.name, {
           name: user.name,
           color: user.color ?? "var(--text-accent)",
           folder,
@@ -54,7 +58,21 @@ export class PresenceManager {
         });
       }
     }
-    return peers;
+    return [...byName.values()];
+  }
+
+  /** Distinct remote display names (ghost connections collapse). */
+  peerNames(): Set<string> {
+    const names = new Set<string>();
+    for (const folder of this.plugin.folders) {
+      const awareness = folder.provider.awareness;
+      for (const [clientId, state] of awareness.getStates()) {
+        if (clientId === awareness.clientID) continue;
+        const name = (state as { user?: { name?: string } }).user?.name;
+        if (name) names.add(name);
+      }
+    }
+    return names;
   }
 
   queueRefresh(): void {

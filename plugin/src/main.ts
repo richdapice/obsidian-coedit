@@ -441,7 +441,7 @@ export default class CoeditPlugin extends Plugin {
       this.setStatus(connecting ? "connecting…" : "offline");
       return;
     }
-    const peers = Math.max(...connected.map((f) => f.provider.awareness.getStates().size - 1));
+    const peers = this.presence.peerNames().size;
     const scope = connected.length === this.folders.length ? "connected" : `${connected.length}/${this.folders.length} connected`;
     const following = this.follow?.target ? ` · following ${this.follow.target}` : "";
     this.setStatus(`${scope} · ${peers} peer${peers === 1 ? "" : "s"} online${following}`);
