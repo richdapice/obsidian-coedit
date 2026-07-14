@@ -414,8 +414,12 @@ export default class CoeditPlugin extends Plugin {
     const provider = folder.provider;
     provider.on("status", () => {
       this.refreshStatus();
-      // Back online: retry editors that declined to bind while offline.
-      if (provider.wsconnected) this.bindings.scan();
+      if (provider.wsconnected) {
+        // Back online: retry editors that declined to bind while offline,
+        // and re-announce our active file to the (possibly re-woken) server.
+        this.bindings.scan();
+        this.presence.publishActiveFile();
+      }
     });
     provider.awareness.on("change", () => {
       this.refreshStatus();

@@ -1,3 +1,4 @@
+import * as encoding from "lib0/encoding";
 import { marked } from "marked";
 import { getServerByName, routePartykitRequest } from "partyserver";
 import { YServer } from "y-partyserver";
@@ -25,8 +26,29 @@ const CKPT_MAX_BYTES = 2 * 1024 * 1024 - 1024;
 const ckptKey = (ts: number) => `${CKPT_PREFIX}${String(ts).padStart(15, "0")}`;
 const ckptTs = (key: string) => Number(key.slice(CKPT_PREFIX.length));
 
+/** y-protocols message type: ask a client to re-send its awareness state. */
+const MESSAGE_QUERY_AWARENESS = 3;
+
 export class YDocServer extends YServer<Env> {
   static options = { hibernate: true };
+
+  override async onStart(): Promise<void> {
+    await super.onStart();
+    // Awareness is in-memory only, and the provider suppresses the usual
+    // renewal interval (so DOs can hibernate). After a hibernation wake the
+    // store is empty and idle peers stay invisible to anyone who connects
+    // later — ask every surviving socket to re-announce itself.
+    const encoder = encoding.createEncoder();
+    encoding.writeVarUint(encoder, MESSAGE_QUERY_AWARENESS);
+    const message = encoding.toUint8Array(encoder);
+    for (const connection of this.getConnections()) {
+      try {
+        connection.send(message);
+      } catch {
+        // Socket already closing; its awareness is gone anyway.
+      }
+    }
+  }
 
   async onLoad(): Promise<void> {
     const chunks = await this.ctx.storage.list<Uint8Array>({ prefix: SNAPSHOT_PREFIX });
