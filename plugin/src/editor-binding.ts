@@ -5,6 +5,7 @@ import { yCollab, yUndoManagerKeymap } from "y-codemirror.next";
 import { whenSynced } from "./collab";
 import { commentsExtension } from "./comments";
 import { edgeIndicators } from "./edge-indicators";
+import { remoteCursors } from "./remote-cursors";
 import { applyDiskDiff, mergeTypedEdits } from "./disk-sync";
 import type CoeditPlugin from "./main";
 import { contentHash } from "./paths";
@@ -155,10 +156,15 @@ export class EditorBindingManager {
         ? { changes: { from: 0, to: cm.state.doc.length, insert: target } }
         : {}),
       effects: this.compartment.reconfigure([
-        yCollab(entry.ytext, entry.provider!.awareness),
+        // No awareness → yCollab skips its widget-based remote cursors,
+        // which leave paint artifacts when Obsidian re-styles lines
+        // (headings). remoteCursors() renders them as CM layers instead
+        // and takes over publishing our own cursor.
+        yCollab(entry.ytext, null),
         Prec.high(keymap.of(yUndoManagerKeymap)),
         commentsExtension(entry),
         edgeIndicators(entry, entry.provider!.awareness),
+        remoteCursors(entry, entry.provider!.awareness),
       ]),
     });
     folder.syncState.set(guid, contentHash(target));
