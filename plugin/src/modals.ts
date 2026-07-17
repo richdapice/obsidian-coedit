@@ -98,9 +98,10 @@ export class JoinFolderModal extends Modal {
 
   onOpen(): void {
     this.setTitle("Join a shared folder");
+    let errorEl: HTMLElement | null = null;
     new Setting(this.contentEl)
       .setName("Folder ID")
-      .setDesc("The ID the sharer gave you.")
+      .setDesc("The ID copied by “Share folder…” (looks like 8-4-4-4-12 hex). NOT an invite token — that goes in Settings → Shared secret.")
       .addText((text) => text.onChange((v) => (this.folderId = v.trim())));
     new Setting(this.contentEl)
       .setName("Local folder")
@@ -112,6 +113,22 @@ export class JoinFolderModal extends Modal {
         .setCta()
         .onClick(() => {
           if (!this.folderId || !this.localPath) return;
+          errorEl?.remove();
+          const showError = (msg: string) => {
+            errorEl = this.contentEl.createEl("p", { text: msg, cls: "coedit-modal-error" });
+          };
+          // Joining a wrong ID "works" — it creates an empty folder — so the
+          // common paste mistakes must be caught here, loudly.
+          if (this.folderId.split(".").length === 4) {
+            showError(
+              "That's an invite token, not a folder ID. Invite tokens go in Settings → Coedit → Shared secret; ask the sharer for the folder ID from “Share folder…” (or its “Copy ID” button in settings).",
+            );
+            return;
+          }
+          if (!/^[0-9a-fA-F-]{16,64}$/.test(this.folderId)) {
+            showError("That doesn't look like a folder ID (expected hex characters and dashes, like 8-4-4-4-12).");
+            return;
+          }
           this.close();
           this.onSubmit(this.folderId, this.localPath.replace(/\/+$/, ""));
         }),

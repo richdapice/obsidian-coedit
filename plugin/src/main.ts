@@ -407,7 +407,15 @@ export default class CoeditPlugin extends Plugin {
     const config: SharedFolderConfig = { localPath, folderId };
     this.settings.sharedFolders.push(config);
     await this.saveSettings();
-    await this.openFolder(config);
+    const folder = await this.openFolder(config);
+    // A wrong folder ID joins a perfectly valid, perfectly EMPTY room with
+    // no error — say so instead of leaving a silently empty folder.
+    if (folder.provider.wsconnected && folder.files.size === 0) {
+      new Notice(
+        "Coedit: joined, but this folder is empty on the server. If you expected files, unlink it in settings and double-check the folder ID.",
+        12000,
+      );
+    }
   }
 
   private wireStatus(folder: SharedFolder): void {

@@ -122,3 +122,9 @@
   white-space: nowrap;
   user-select: none;
 }
+
+.coedit-modal-error {
+  color: var(--text-error);
+  font-size: var(--font-ui-small);
+  margin: 4px 0 0;
+}
