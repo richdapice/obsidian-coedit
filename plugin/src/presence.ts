@@ -3,6 +3,7 @@ import { FuzzySuggestModal, MarkdownView, Notice } from "obsidian";
 import * as Y from "yjs";
 import type CoeditPlugin from "./main";
 import type { DocEntry } from "./doc-manager";
+import { clientInserted, deltaChangePosition, type DeltaOp } from "./follow-utils";
 import type { SharedFolder } from "./shared-folder";
 
 /** Shape of the file-explorer view's internals we rely on (stable for years, but not public API). */
@@ -242,8 +243,40 @@ export class FollowManager {
     this.clearCursorWatch();
     const listener = () => this.scrollToPeerCursor(entry, awareness);
     awareness.on("change", listener);
-    this.cursorCleanup = () => awareness.off("change", listener);
+    // Cursor awareness freezes while the peer edits inside Obsidian's table
+    // sub-editor (the main editor is unfocused, so y-codemirror stops
+    // publishing). Their edits still arrive though — follow those instead.
+    const editObserver = (event: Y.YTextEvent, txn: Y.Transaction) => {
+      if (this.targetName === null || txn.local) return;
+      const targetClientId = this.findClientId(awareness, this.targetName);
+      if (targetClientId === null || !clientInserted(txn, targetClientId)) return;
+      const pos = deltaChangePosition(event.changes.delta as DeltaOp[]);
+      if (pos !== null) this.scrollTo(pos);
+    };
+    entry.ytext.observe(editObserver);
+    this.cursorCleanup = () => {
+      awareness.off("change", listener);
+      entry.ytext.unobserve(editObserver);
+    };
     listener();
+  }
+
+  private findClientId(
+    awareness: { clientID: number; getStates(): Map<number, unknown> },
+    name: string,
+  ): number | null {
+    for (const [clientId, state] of awareness.getStates()) {
+      if (clientId === awareness.clientID) continue;
+      if ((state as { user?: { name?: string } }).user?.name === name) return clientId;
+    }
+    return null;
+  }
+
+  private scrollTo(index: number): void {
+    const view = this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
+    const cm = (view?.editor as unknown as { cm?: EditorView } | undefined)?.cm;
+    if (!cm || index > cm.state.doc.length) return;
+    cm.dispatch({ effects: EditorView.scrollIntoView(index, { y: "center" }) });
   }
 
   private scrollToPeerCursor(
@@ -262,10 +295,7 @@ export class FollowManager {
         const rel = Y.createRelativePositionFromJSON(s.cursor.head);
         const abs = Y.createAbsolutePositionFromRelativePosition(rel, entry.doc);
         if (!abs) return;
-        const view = this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
-        const cm = (view?.editor as unknown as { cm?: EditorView } | undefined)?.cm;
-        if (!cm || abs.index > cm.state.doc.length) return;
-        cm.dispatch({ effects: EditorView.scrollIntoView(abs.index, { y: "center" }) });
+        this.scrollTo(abs.index);
       } catch {
         // Anchor didn't resolve (stale state); the next change retries.
       }
