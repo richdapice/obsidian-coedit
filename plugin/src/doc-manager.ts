@@ -13,8 +13,10 @@ export interface DocEntry {
   provider: YProvider | null;
   /** Number of editors currently showing this doc. */
   refs: number;
-  /** Resolves once the locally persisted (IndexedDB) state is loaded. */
+  /** Resolves once the locally persisted (IndexedDB) state is loaded — or after a timeout so a destroyed-mid-load idb can't hang callers. */
   ready: Promise<void>;
+  /** True only after the REAL IndexedDB load finished (never set by the timeout). Anything that seeds content must require this. */
+  loaded: boolean;
   /**
    * Last text at which disk and CRDT agreed while the doc was open. Base for
    * fuzzy-merging edits that bypass the bound editor (reading-view checkbox
@@ -73,24 +75,56 @@ export class DocManager {
       const doc = new Y.Doc();
       const idb = new IndexeddbPersistence(`${this.dbPrefix}-${guid}`, doc);
       this.idbs.set(guid, idb);
-      entry = {
+      const created: DocEntry = {
         guid,
         doc,
         ytext: doc.getText("contents"),
         provider: null,
         refs: 0,
-        ready: idb.whenSynced.then(() => undefined),
+        loaded: false,
+        ready: Promise.resolve(), // replaced below; entry must exist first
         recentTextHashes: [],
       };
+      // A doc destroyed mid-load suppresses idb's synced event; without a
+      // timeout an attach would hang on `ready` forever. Only the REAL load
+      // sets `loaded` — the timeout path unblocks callers but must never
+      // authorize content seeding.
+      let timer = 0;
+      created.ready = Promise.race([
+        idb.whenSynced.then(() => {
+          created.loaded = true;
+          window.clearTimeout(timer);
+        }),
+        new Promise<void>((resolve) => {
+          timer = window.setTimeout(() => {
+            if (!created.loaded) {
+              console.warn(`coedit: idb load slow/stuck for ${guid.slice(0, 8)}; proceeding unloaded`);
+            }
+            resolve();
+          }, 15000);
+        }),
+      ]);
+      entry = created;
       this.entries.set(guid, entry);
     }
     return entry;
   }
 
-  /** An editor opened the file: hold a live connection. */
-  connect(guid: string): DocEntry {
+  /**
+   * Take a ref WITHOUT creating a provider. Editor attaches call this
+   * synchronously before their first await, so eviction and the closed-file
+   * pipeline treat the doc as open for the whole pre-connect phase — the
+   * evict/attach race that poisoned docs in the July 2026 incident.
+   */
+  retain(guid: string): DocEntry {
     const entry = this.get(guid);
     entry.refs++;
+    return entry;
+  }
+
+  /** Create/ensure the live connection for a doc some ref-holder opened. */
+  ensureProvider(guid: string): DocEntry {
+    const entry = this.get(guid);
     if (!entry.provider) {
       entry.provider = createProvider(this.getSettings(), roomName(this.folderId, guid), entry.doc);
     }
@@ -131,8 +165,11 @@ export class DocManager {
   }
 
   /**
-   * Free the doc and its IndexedDB handle if no editor holds it (data stays
-   * in IndexedDB). Call only while holding the guid's lock.
+   * Free the doc and its IndexedDB handle if nothing holds it (data stays in
+   * IndexedDB). Call only while holding the guid's lock, and ONLY when the
+   * file is gone (deleted/unshared) — per-sync eviction caused both the
+   * evict/attach race and the cold-IndexedDB-open lag of the July 2026
+   * incident; entries now stay resident for the session.
    */
   evictIfClosed(guid: string): void {
     const entry = this.entries.get(guid);

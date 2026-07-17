@@ -128,6 +128,10 @@ export class SharedFolder {
   async syncClosedFile(relPath: string, meta: FileMeta): Promise<void> {
     await this.docs.withLock(meta.guid, async () => {
       if (this.docs.isOpen(meta.guid)) return; // the editor binding owns it
+      // Re-check liveness inside the lock: a sync queued behind a remote
+      // delete/rename must not resurrect the file from doc state.
+      const live = this.files.get(relPath);
+      if (live?.guid !== meta.guid) return;
       const path = this.abs(relPath);
       const af = this.vault.getAbstractFileByPath(path);
       const diskText = af instanceof TFile ? await this.vault.cachedRead(af) : null;
@@ -205,6 +209,13 @@ export class SharedFolder {
         }
       }
 
+      // Never rewrite disk from an UNVERIFIED doc: offline with nothing
+      // folded means we learned nothing this round — leaving the file alone
+      // is always safe, while writing stale/poisoned doc state over it (and
+      // recording syncState to match) destroyed on-disk edits in the July
+      // 2026 incident.
+      if (!pulled && !folded) return;
+
       if (diskText !== finalText) {
         await this.applier.writeFile(path, finalText);
       }
@@ -215,7 +226,6 @@ export class SharedFolder {
           this.files.set(relPath, { ...current, hash: finalHash, mtime: Date.now() }),
         );
       }
-      this.docs.evictIfClosed(meta.guid);
     });
   }
 
@@ -403,7 +413,6 @@ export class SharedFolder {
           this.files.set(relPath, { ...current, hash: finalHash, mtime: Date.now() }),
         );
       }
-      this.docs.evictIfClosed(meta.guid);
     });
   }
 
@@ -506,6 +515,10 @@ export class SharedFolder {
       await this.docs.withLock(meta.guid, async () => {
         const content = await this.vault.cachedRead(file);
         const entry = this.docs.get(meta.guid);
+        // "Open" now includes an attach's pre-bind window (retain is taken
+        // before the binding lands). Until the binding sets lastAgreedText,
+        // the doc may still be loading — attach's own fold owns this save.
+        if (entry.lastAgreedText === undefined) return;
         const kind = classifyOpenModify(
           contentHash(content),
           contentHash(entry.ytext.toString()),
@@ -551,6 +564,10 @@ export class SharedFolder {
     }
     for (const d of delta.removed) {
       await this.applier.trash(this.abs(d.path));
+      // The file is really gone — this is the only time a doc gets evicted.
+      await this.docs.withLock(d.meta.guid, async () => {
+        this.docs.evictIfClosed(d.meta.guid);
+      });
     }
     for (const a of [...delta.added, ...delta.updated]) {
       if (a.meta.kind === "blob") {
