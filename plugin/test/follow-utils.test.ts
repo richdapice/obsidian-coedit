@@ -55,3 +55,47 @@ describe("clientInserted", () => {
     expect(attributed).toBe(false);
   });
 });
+
+describe("soleInserter", () => {
+  it("accepts the target when only they inserted", async () => {
+    const { soleInserter } = await import("../src/follow-utils");
+    const alice = new Y.Doc();
+    const bob = new Y.Doc();
+    alice.getText("t").insert(0, "base ");
+    Y.applyUpdate(bob, Y.encodeStateAsUpdate(alice));
+
+    let sole = false;
+    alice.getText("t").observe((_e, txn) => {
+      sole = soleInserter(txn, bob.clientID);
+    });
+    bob.getText("t").insert(5, "bob");
+    Y.applyUpdate(alice, Y.encodeStateAsUpdate(bob, Y.encodeStateVector(alice)));
+    expect(sole).toBe(true);
+  });
+
+  it("rejects batched transactions carrying several authors' inserts", async () => {
+    const { soleInserter } = await import("../src/follow-utils");
+    // Bob and carol both edit; alice receives everything in ONE batched
+    // update (reconnect catch-up shape).
+    const alice = new Y.Doc();
+    const bob = new Y.Doc();
+    const carol = new Y.Doc();
+    alice.getText("t").insert(0, "base ");
+    Y.applyUpdate(bob, Y.encodeStateAsUpdate(alice));
+    Y.applyUpdate(carol, Y.encodeStateAsUpdate(alice));
+
+    bob.getText("t").insert(5, "bob");
+    Y.applyUpdate(carol, Y.encodeStateAsUpdate(bob, Y.encodeStateVector(carol)));
+    carol.getText("t").insert(0, "carol ");
+
+    let soleBob = true;
+    let soleCarol = true;
+    alice.getText("t").observe((_e, txn) => {
+      soleBob = soleInserter(txn, bob.clientID);
+      soleCarol = soleInserter(txn, carol.clientID);
+    });
+    Y.applyUpdate(alice, Y.encodeStateAsUpdate(carol, Y.encodeStateVector(alice)));
+    expect(soleBob).toBe(false);
+    expect(soleCarol).toBe(false);
+  });
+});

@@ -40,3 +40,18 @@ export function clientInserted(txn: Y.Transaction, clientId: number): boolean {
   const after = txn.afterState.get(clientId) ?? 0;
   return after > before;
 }
+
+/**
+ * Is `clientId` the ONLY client whose clock advanced in this transaction?
+ * Batched updates (reconnect catch-up) can carry several authors' inserts in
+ * one transaction; the delta position is then ambiguous and following it
+ * could jump to someone else's edit.
+ */
+export function soleInserter(txn: Y.Transaction, clientId: number): boolean {
+  if (!clientInserted(txn, clientId)) return false;
+  for (const [otherId, after] of txn.afterState) {
+    if (otherId === clientId) continue;
+    if (after > (txn.beforeState.get(otherId) ?? 0)) return false;
+  }
+  return true;
+}

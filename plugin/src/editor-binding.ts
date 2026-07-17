@@ -4,6 +4,7 @@ import { editorInfoField, type MarkdownView, Notice } from "obsidian";
 import { yCollab, yUndoManagerKeymap } from "y-codemirror.next";
 import { whenSynced } from "./collab";
 import { commentsExtension } from "./comments";
+import { edgeIndicators } from "./edge-indicators";
 import { applyDiskDiff, mergeTypedEdits } from "./disk-sync";
 import type CoeditPlugin from "./main";
 import { contentHash } from "./paths";
@@ -157,6 +158,7 @@ export class EditorBindingManager {
         yCollab(entry.ytext, entry.provider!.awareness),
         Prec.high(keymap.of(yUndoManagerKeymap)),
         commentsExtension(entry),
+        edgeIndicators(entry, entry.provider!.awareness),
       ]),
     });
     folder.syncState.set(guid, contentHash(target));

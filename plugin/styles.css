@@ -48,3 +48,48 @@
   width: 100%;
   resize: vertical;
 }
+
+.coedit-edge-indicators {
+  position: absolute;
+  right: 16px;
+  z-index: var(--layer-popover);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  pointer-events: none;
+}
+
+.coedit-edge-top {
+  top: 8px;
+}
+
+.coedit-edge-bottom {
+  bottom: 8px;
+}
+
+.coedit-edge-chip {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 12px;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  box-shadow: var(--shadow-s);
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.coedit-edge-chip:hover {
+  color: var(--text-normal);
+}
+
+.coedit-edge-arrow {
+  font-size: 0.7em;
+}
+
+.coedit-edge-chip .coedit-presence-dot {
+  margin-left: 0;
+}

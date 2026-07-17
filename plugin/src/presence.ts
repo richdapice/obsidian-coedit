@@ -3,7 +3,7 @@ import { FuzzySuggestModal, MarkdownView, Notice } from "obsidian";
 import * as Y from "yjs";
 import type CoeditPlugin from "./main";
 import type { DocEntry } from "./doc-manager";
-import { clientInserted, deltaChangePosition, type DeltaOp } from "./follow-utils";
+import { deltaChangePosition, type DeltaOp, soleInserter } from "./follow-utils";
 import type { SharedFolder } from "./shared-folder";
 
 /** Shape of the file-explorer view's internals we rely on (stable for years, but not public API). */
@@ -249,7 +249,10 @@ export class FollowManager {
     const editObserver = (event: Y.YTextEvent, txn: Y.Transaction) => {
       if (this.targetName === null || txn.local) return;
       const targetClientId = this.findClientId(awareness, this.targetName);
-      if (targetClientId === null || !clientInserted(txn, targetClientId)) return;
+      // Sole-inserter check: a batched transaction (reconnect catch-up) can
+      // carry several authors' edits, making the delta position ambiguous —
+      // skip those rather than jump to someone else's edit.
+      if (targetClientId === null || !soleInserter(txn, targetClientId)) return;
       const pos = deltaChangePosition(event.changes.delta as DeltaOp[]);
       if (pos !== null) this.scrollTo(pos);
     };
