@@ -1,4 +1,36 @@
-import { type App, Modal, Setting } from "obsidian";
+import { AbstractInputSuggest, type App, Modal, Setting, TFolder } from "obsidian";
+
+/** Autocomplete over existing vault folders, attached to a plain text input. */
+class FolderSuggest extends AbstractInputSuggest<TFolder> {
+  constructor(
+    app: App,
+    private inputEl: HTMLInputElement,
+    private onPick: (path: string) => void,
+  ) {
+    super(app, inputEl);
+  }
+
+  getSuggestions(query: string): TFolder[] {
+    const q = query.toLowerCase();
+    return this.app.vault
+      .getAllLoadedFiles()
+      .filter(
+        (f): f is TFolder =>
+          f instanceof TFolder && f.path !== "/" && f.path.toLowerCase().includes(q),
+      )
+      .slice(0, 50);
+  }
+
+  renderSuggestion(folder: TFolder, el: HTMLElement): void {
+    el.setText(folder.path);
+  }
+
+  selectSuggestion(folder: TFolder): void {
+    this.inputEl.value = folder.path;
+    this.onPick(folder.path);
+    this.close();
+  }
+}
 
 export class ShareFolderModal extends Modal {
   private folderPath: string;
@@ -16,10 +48,11 @@ export class ShareFolderModal extends Modal {
     this.setTitle("Share a folder");
     new Setting(this.contentEl)
       .setName("Folder")
-      .setDesc("Vault-relative path of the folder to share.")
-      .addText((text) =>
-        text.setValue(this.folderPath).onChange((v) => (this.folderPath = v.trim())),
-      );
+      .setDesc("Pick an existing folder to share.")
+      .addText((text) => {
+        text.setValue(this.folderPath).onChange((v) => (this.folderPath = v.trim()));
+        new FolderSuggest(this.app, text.inputEl, (path) => (this.folderPath = path));
+      });
     new Setting(this.contentEl).addButton((btn) =>
       btn
         .setButtonText("Share")
@@ -105,8 +138,11 @@ export class JoinFolderModal extends Modal {
       .addText((text) => text.onChange((v) => (this.folderId = v.trim())));
     new Setting(this.contentEl)
       .setName("Local folder")
-      .setDesc("Vault-relative folder to sync into (created if missing).")
-      .addText((text) => text.onChange((v) => (this.localPath = v.trim())));
+      .setDesc("Pick an existing folder, or type a new path to create it.")
+      .addText((text) => {
+        text.onChange((v) => (this.localPath = v.trim()));
+        new FolderSuggest(this.app, text.inputEl, (path) => (this.localPath = path));
+      });
     new Setting(this.contentEl).addButton((btn) =>
       btn
         .setButtonText("Join")
