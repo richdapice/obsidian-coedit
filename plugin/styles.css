@@ -128,3 +128,11 @@
   font-size: var(--font-ui-small);
   margin: 4px 0 0;
 }
+
+/* performance log modal */
+.coedit-perf-log {
+  max-height: 60vh;
+  overflow: auto;
+  font-size: 0.8em;
+  user-select: text;
+}

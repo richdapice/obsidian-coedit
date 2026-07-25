@@ -1,9 +1,9 @@
-import { type App, TFile, TFolder, type TAbstractFile, type Vault } from "obsidian";
+import { type App, Notice, TFile, TFolder, type TAbstractFile, type Vault } from "obsidian";
 import { IndexeddbPersistence } from "y-indexeddb";
 import type YProvider from "y-partyserver/provider";
 import * as Y from "yjs";
 import { createProvider, whenSynced } from "./collab";
-import { applyDiskDiff, mergeTypedEdits } from "./disk-sync";
+import { applyDiskDiff, isWholesaleChange, mergeTypedEdits } from "./disk-sync";
 import { DocManager } from "./doc-manager";
 import { pullBlob, pushBlob, roomName } from "./net";
 import {
@@ -17,6 +17,7 @@ import {
   sha256Hex,
   toRelative,
 } from "./paths";
+import { Tracer } from "./perf";
 import type { CoeditSettings, SharedFolderConfig } from "./settings";
 import type { VaultApplier } from "./vault-applier";
 
@@ -39,7 +40,11 @@ export interface SyncStateStore {
  * Sync-order invariant: offline disk edits are folded into the local
  * (IndexedDB-persisted) doc BEFORE that doc receives remote updates, so Yjs
  * itself merges local and remote edits. Diffing after a remote merge would
- * delete the remote edits (see disk-sync tests).
+ * delete the remote edits (see disk-sync tests). Since lingering sockets can
+ * feed remote updates into closed docs, "before any remote update" is
+ * verified by HASH (doc still at the last disk agreement recorded in
+ * syncState), never assumed from provider state; docs past that point merge
+ * via fuzzy patches or fall back to a conflict copy.
  */
 export class SharedFolder {
   readonly doc = new Y.Doc();
@@ -114,6 +119,62 @@ export class SharedFolder {
     this.doc.transact(fn, LOCAL);
   }
 
+  /** Last warned content-hash per path, so retries don't stack Notices. */
+  private warnedWholesale = new Map<string, string>();
+
+  /** Loud, user-visible warning when a note's content is mostly replaced. */
+  private warnWholesale(relPath: string, source: string, resultHash: string): void {
+    if (this.warnedWholesale.get(relPath) === resultHash) return;
+    this.warnedWholesale.set(relPath, resultHash);
+    console.warn(`coedit: "${relPath}" was almost entirely rewritten ${source}`);
+    new Notice(
+      `Coedit: "${relPath}" was almost entirely rewritten ${source}. ` +
+        `If that's unexpected, use "Version history for current note" to restore it.`,
+      10000,
+    );
+  }
+
+  /** Conflict Notices shown recently; after a few in a burst, console-only
+   *  (a lost syncState store would otherwise bury the user in per-file
+   *  Notices). A quiet 10 minutes resets the budget. */
+  private conflictNotices = 0;
+  private lastConflictAt = 0;
+
+  private notifyConflict(relPath: string, copyRel: string): void {
+    if (Date.now() - this.lastConflictAt > 10 * 60 * 1000) this.conflictNotices = 0;
+    this.lastConflictAt = Date.now();
+    this.conflictNotices++;
+    if (this.conflictNotices === 4) {
+      new Notice("Coedit: more unmerged conflicts — see the developer console for the full list.", 10000);
+    }
+    if (this.conflictNotices >= 4) return;
+    new Notice(
+      `Coedit: "${relPath}" changed on disk while unsynced edits arrived and the two ` +
+        `couldn't be merged. Your disk version was kept as "${copyRel}".`,
+      10000,
+    );
+  }
+
+  /**
+   * Preserve diverged disk text as a sibling file. Created via the vault (not
+   * the applier) ON PURPOSE: the create event enrolls the copy into the
+   * share, so it reaches every peer and can be merged from anywhere.
+   */
+  async saveConflictCopy(relPath: string, text: string): Promise<string> {
+    const dot = relPath.lastIndexOf(".");
+    const stem = dot === -1 ? relPath : relPath.slice(0, dot);
+    const ext = dot === -1 ? "" : relPath.slice(dot);
+    const d = new Date();
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}.${pad(d.getMinutes())}`;
+    let copyRel = `${stem} (conflict ${stamp})${ext}`;
+    for (let n = 2; this.vault.getAbstractFileByPath(this.abs(copyRel)) !== null; n++) {
+      copyRel = `${stem} (conflict ${stamp} ${n})${ext}`;
+    }
+    await this.vault.create(this.abs(copyRel), text);
+    return copyRel;
+  }
+
   private get vault(): Vault {
     return this.app.vault;
   }
@@ -126,7 +187,17 @@ export class SharedFolder {
    * and publish hash/state. Serialized per guid; skips docs an editor holds.
    */
   async syncClosedFile(relPath: string, meta: FileMeta): Promise<void> {
+    const tracer = new Tracer(`closed-sync ${relPath}`);
+    try {
+      await this.syncClosedFileLocked(relPath, meta, tracer);
+    } finally {
+      tracer.end();
+    }
+  }
+
+  private async syncClosedFileLocked(relPath: string, meta: FileMeta, tracer: Tracer): Promise<void> {
     await this.docs.withLock(meta.guid, async () => {
+      tracer.mark("lock-wait");
       if (this.docs.isOpen(meta.guid)) return; // the editor binding owns it
       // Re-check liveness inside the lock: a sync queued behind a remote
       // delete/rename must not resurrect the file from doc state.
@@ -137,21 +208,62 @@ export class SharedFolder {
       const diskText = af instanceof TFile ? await this.vault.cachedRead(af) : null;
       const entry = this.docs.get(meta.guid);
       await entry.ready;
+      tracer.mark("read");
 
-      // 1. Fold offline local edits in while the local doc is still at the
-      //    state the disk text was derived from — before any remote merge.
+      const lingering = this.docs.hasProvider(meta.guid);
+      const beforeText = entry.ytext.toString();
+      const agreedHash = this.syncState.get(meta.guid);
+
+      // 1. Fold local disk edits in. applyDiskDiff makes ytext EQUAL disk —
+      //    that is only safe while ytext still sits at the state the disk
+      //    text was derived from (its hash matches syncState). A doc that
+      //    moved past that point — a lingering socket streamed remote
+      //    updates in, now or in a previous run (they survive via
+      //    IndexedDB) — must merge instead: folding would delete the remote
+      //    edits and push the deletion. Keyed on hashes, NOT on provider
+      //    presence, so the hazard doesn't resurface after linger expiry or
+      //    a restart.
       let folded = false;
+      let diskHandled = false;
+      let conflict = false;
+      let echoConfirmed = false;
       if (
         diskText !== null &&
         entry.ytext.length > 0 &&
-        contentHash(diskText) !== this.syncState.get(meta.guid) &&
-        diskText !== entry.ytext.toString()
+        contentHash(diskText) !== agreedHash &&
+        diskText !== beforeText
       ) {
-        applyDiskDiff(entry.doc, entry.ytext, diskText);
-        folded = true;
+        diskHandled = true;
+        const docAtAgreement = agreedHash !== undefined && contentHash(beforeText) === agreedHash;
+        if (docAtAgreement) {
+          applyDiskDiff(entry.doc, entry.ytext, diskText);
+          folded = true;
+        } else if (lingering && entry.recentTextHashes.includes(contentHash(diskText))) {
+          // Stale autosave echo of an earlier doc state; the doc is strictly
+          // ahead, and the final write below refreshes disk from it. That
+          // write must happen THIS round even offline: the echo knowledge
+          // dies with the linger, and a later round would misread the stale
+          // disk as a real edit and re-merge already-applied deltas.
+          echoConfirmed = true;
+        } else if (
+          entry.lastAgreedText !== undefined &&
+          agreedHash !== undefined &&
+          contentHash(entry.lastAgreedText) === agreedHash &&
+          mergeTypedEdits(entry.doc, entry.ytext, entry.lastAgreedText, diskText)
+        ) {
+          folded = true;
+        } else {
+          // Disk and doc both moved with no usable merge base (restart after
+          // a linger, or the fuzzy patches failed to place). Never guess:
+          // keep the disk text as a conflict copy and let the doc own the
+          // path — handled after the pull below.
+          conflict = true;
+        }
       }
+      const foldWholesale = folded && isWholesaleChange(beforeText, entry.ytext.toString());
 
       // 2. Merge the server's state.
+      tracer.mark("fold");
       let pulled = false;
       try {
         await this.docs.pull(meta.guid);
@@ -159,11 +271,34 @@ export class SharedFolder {
       } catch (err) {
         console.warn(`coedit: pull failed for ${relPath}; continuing offline`, err);
       }
+      tracer.mark("pull");
+
+      // 2b. The both-moved conflict from step 1: only resolvable against a
+      //     verified doc. Offline, leave everything untouched and retry.
+      if (conflict) {
+        if (!pulled || diskText === null) return;
+        // Nothing to preserve when the post-pull doc already contains the
+        // disk text verbatim (e.g. a lost-syncState restart where only the
+        // doc really moved) — skip the copy and just converge.
+        if (!entry.ytext.toString().includes(diskText)) {
+          try {
+            const copyRel = await this.saveConflictCopy(relPath, diskText);
+            console.warn(`coedit: kept diverged disk copy of "${relPath}" as "${copyRel}"`);
+            this.notifyConflict(relPath, copyRel);
+          } catch (err) {
+            // Without the copy, overwriting disk below would destroy the edit.
+            console.error(`coedit: failed to save conflict copy for ${relPath}`, err);
+            return;
+          }
+        }
+      }
 
       // 3. Fresh-device path collision: local file text never entered any
-      //    doc. Fold it into the pulled state (positional merge).
+      //    doc. Fold it into the pulled state (positional merge). Skip when
+      //    step 1 already made a call about this disk text.
       if (
         !folded &&
+        !diskHandled &&
         pulled &&
         diskText !== null &&
         diskText.length > 0 &&
@@ -194,6 +329,7 @@ export class SharedFolder {
       const finalText = entry.ytext.toString();
       const finalHash = contentHash(finalText);
       const advertised = this.files.get(relPath);
+      tracer.mark("merge");
       if (
         !isReadOnlyToken(this.getSettings().token) &&
         (folded ||
@@ -208,24 +344,40 @@ export class SharedFolder {
           console.warn(`coedit: push failed for ${relPath}; queued for retry`, err);
         }
       }
+      tracer.mark("push");
 
       // Never rewrite disk from an UNVERIFIED doc: offline with nothing
       // folded means we learned nothing this round — leaving the file alone
       // is always safe, while writing stale/poisoned doc state over it (and
       // recording syncState to match) destroyed on-disk edits in the July
-      // 2026 incident.
-      if (!pulled && !folded) return;
+      // 2026 incident. A confirmed stale echo is the exception: the disk is
+      // proven to be an old snapshot OF THIS DOC, so refreshing it from the
+      // doc is safe (and required) even offline.
+      if (!pulled && !folded && !echoConfirmed) return;
+
+      // Tripwire: a note being almost entirely replaced is occasionally
+      // legitimate (scripted notes) but is also the signature of a paste-
+      // into-the-wrong-note accident or a sync bug. Never let it be silent.
+      // foldWholesale was measured BEFORE the pull so remote rewrites aren't
+      // blamed on the disk; the conflict path already produced its own Notice.
+      if (foldWholesale) {
+        this.warnWholesale(relPath, "from a disk edit", finalHash);
+      } else if (!conflict && diskText !== null && isWholesaleChange(diskText, finalText)) {
+        this.warnWholesale(relPath, "by remote content", finalHash);
+      }
 
       if (diskText !== finalText) {
         await this.applier.writeFile(path, finalText);
       }
       this.syncState.set(meta.guid, finalHash);
+      if (lingering) entry.lastAgreedText = finalText;
       const current = this.files.get(relPath);
       if (current?.guid === meta.guid && current.hash !== finalHash) {
         this.transact(() =>
           this.files.set(relPath, { ...current, hash: finalHash, mtime: Date.now() }),
         );
       }
+      tracer.mark("write");
     });
   }
 
@@ -535,9 +687,11 @@ export class SharedFolder {
         const content = await this.vault.cachedRead(file);
         const entry = this.docs.get(meta.guid);
         // "Open" now includes an attach's pre-bind window (retain is taken
-        // before the binding lands). Until the binding sets lastAgreedText,
-        // the doc may still be loading — attach's own fold owns this save.
-        if (entry.lastAgreedText === undefined) return;
+        // before the binding lands). Until a binding is INSTALLED, attach's
+        // own locked fold owns every save — merging one here as well would
+        // apply the same delta twice. (boundCount, not lastAgreedText:
+        // closed-file syncs may set lastAgreedText for lingering docs.)
+        if (entry.boundCount === 0) return;
         const kind = classifyOpenModify(
           contentHash(content),
           contentHash(entry.ytext.toString()),
@@ -551,7 +705,14 @@ export class SharedFolder {
           // Written around the editor (checkbox tap, other plugin). Merge
           // against the last agreed base; the binding streams the merged
           // text back into the editor and Obsidian re-saves it.
-          mergeTypedEdits(entry.doc, entry.ytext, entry.lastAgreedText ?? content, content);
+          if (isWholesaleChange(entry.ytext.toString(), content)) {
+            this.warnWholesale(rel, "from a disk edit", contentHash(content));
+          }
+          if (!mergeTypedEdits(entry.doc, entry.ytext, entry.lastAgreedText ?? content, content)) {
+            // The editor still shows the doc's version, so nothing is hidden;
+            // the next save retries against a fresher base.
+            console.warn(`coedit: external edit to "${rel}" did not merge cleanly; will retry`);
+          }
         }
         const finalText = entry.ytext.toString();
         const hash = contentHash(finalText);
