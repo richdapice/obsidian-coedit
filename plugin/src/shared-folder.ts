@@ -416,6 +416,25 @@ export class SharedFolder {
     });
   }
 
+  /**
+   * Load every doc's IndexedDB state in the background so the first click
+   * on each note doesn't pay the cold open + update-log replay. Paced with
+   * small yields; safe to abandon mid-way (session restart destroys the
+   * DocManager, which makes get() throw — we just stop).
+   */
+  async prewarmDocs(): Promise<void> {
+    for (const [, meta] of [...this.files.entries()]) {
+      if (meta.kind === "blob") continue;
+      try {
+        const entry = this.docs.get(meta.guid);
+        await entry.ready;
+      } catch {
+        return; // manager destroyed (settings change/unlink) — stop quietly
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 50));
+    }
+  }
+
   // ---- local vault events → index map
 
   async onLocalCreate(file: TAbstractFile): Promise<void> {

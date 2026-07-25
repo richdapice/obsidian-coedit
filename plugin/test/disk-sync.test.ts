@@ -80,3 +80,47 @@ describe("mergeTypedEdits", () => {
     expect(Y.encodeStateVector(doc)).toEqual(before);
   });
 });
+
+describe("diffToChanges", () => {
+  const apply = (text: string, changes: Array<{ from: number; to: number; insert: string }>) => {
+    // Apply like CM does: all positions refer to the original document.
+    let result = "";
+    let last = 0;
+    for (const c of [...changes].sort((a, b) => a.from - b.from)) {
+      result += text.slice(last, c.from) + c.insert;
+      last = c.to;
+    }
+    return result + text.slice(last);
+  };
+
+  it("returns no changes for identical text", async () => {
+    const { diffToChanges } = await import("../src/disk-sync");
+    expect(diffToChanges("same", "same")).toEqual([]);
+  });
+
+  it("produces a small change for a small edit", async () => {
+    const { diffToChanges } = await import("../src/disk-sync");
+    const a = "line one\nline two\nline three\n";
+    const b = "line one\nline 2\nline three\n";
+    const changes = diffToChanges(a, b);
+    expect(apply(a, changes)).toBe(b);
+    // The edit is localized — nowhere near a full-document replace.
+    const touched = changes.reduce((n, c) => n + (c.to - c.from) + c.insert.length, 0);
+    expect(touched).toBeLessThan(12);
+  });
+
+  it("handles replaces, pure inserts, and pure deletes", async () => {
+    const { diffToChanges } = await import("../src/disk-sync");
+    const cases: Array<[string, string]> = [
+      ["abc def ghi", "abc XYZ ghi"],
+      ["abc ghi", "abc def ghi"],
+      ["abc def ghi", "abc ghi"],
+      ["", "hello"],
+      ["hello", ""],
+      ["a\nb\nc", "c\nb\na"],
+    ];
+    for (const [a, b] of cases) {
+      expect(apply(a, diffToChanges(a, b))).toBe(b);
+    }
+  });
+});

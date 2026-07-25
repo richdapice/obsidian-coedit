@@ -6,7 +6,7 @@ import { whenSynced } from "./collab";
 import { commentsExtension } from "./comments";
 import { edgeIndicators } from "./edge-indicators";
 import { remoteCursors } from "./remote-cursors";
-import { applyDiskDiff, mergeTypedEdits } from "./disk-sync";
+import { applyDiskDiff, diffToChanges, mergeTypedEdits } from "./disk-sync";
 import type CoeditPlugin from "./main";
 import { contentHash } from "./paths";
 import type { SharedFolder } from "./shared-folder";
@@ -120,40 +120,48 @@ export class EditorBindingManager {
       if (stale() || baseText === null) return bail();
 
       folder.docs.ensureProvider(guid);
-      let online = true;
-      if (entry.provider) {
-        try {
-          await whenSynced(entry.provider);
-        } catch (err) {
+      // Bind-local-first: with a loaded, non-empty local doc there is no
+      // reason to block the click path on a server round-trip — the fold
+      // already ran before the provider existed, so remote updates merge in
+      // through the CRDT whenever the socket catches up. Only the
+      // recovery-seed case (empty local doc, non-empty editor) needs the
+      // server's word before proceeding.
+      if (entry.ytext.length === 0 && cm.state.doc.length > 0) {
+        let online = true;
+        if (entry.provider) {
+          try {
+            await whenSynced(entry.provider);
+          } catch (err) {
+            online = false;
+            console.warn("coedit: editor attach offline", err);
+          }
+        } else {
           online = false;
-          console.warn("coedit: editor attach offline", err);
         }
-      } else {
-        online = false;
+        if (stale()) return bail();
+        if (entry.ytext.length === 0 && cm.state.doc.length > 0) {
+          // Seeding needs BOTH: a synced provider (server really is empty)
+          // and a completed IndexedDB load (`loaded`, never set by the ready
+          // timeout) — seeding an unloaded doc would duplicate the note when
+          // the slow load lands on top. Otherwise stay unbound; edits still
+          // sync via the closed-file pipeline, and the next scan retries.
+          if (online && entry.loaded) {
+            // Recovery seeding for a doc the server lost; normally the
+            // creator seeded it at enroll time and this branch never runs.
+            entry.ytext.insert(0, cm.state.doc.toString());
+          } else {
+            bail();
+            new Notice("Coedit: this note isn't ready to bind yet — it will connect automatically.");
+            return;
+          }
+        }
       }
       if (stale()) return bail();
       const info = cm.state.field(editorInfoField, false);
       if (info?.file?.path !== path || !entry.provider) return bail();
 
-      if (entry.ytext.length === 0 && cm.state.doc.length > 0) {
-        // Seeding needs BOTH: a synced provider (server really is empty) and
-        // a completed IndexedDB load (`loaded`, never set by the ready
-        // timeout) — seeding an unloaded doc would duplicate the note when
-        // the slow load lands on top. Otherwise stay unbound; edits still
-        // sync via the closed-file pipeline, and the next scan retries.
-        if (online && entry.loaded) {
-          // Recovery seeding for a doc the server lost; normally the creator
-          // seeded it at enroll time and this branch never runs.
-          entry.ytext.insert(0, cm.state.doc.toString());
-        } else {
-          bail();
-          new Notice("Coedit: this note isn't ready to bind yet — it will connect automatically.");
-          return;
-        }
-      }
-
-      // Anything typed while we were syncing exists only in the editor; merge
-      // it into the CRDT (fuzzy-positioned) rather than wiping it.
+      // Anything typed while we were binding exists only in the editor;
+      // merge it into the CRDT (fuzzy-positioned) rather than wiping it.
       const typedText = cm.state.doc.toString();
       if (typedText !== baseText) {
         mergeTypedEdits(entry.doc, entry.ytext, baseText, typedText);
@@ -161,10 +169,11 @@ export class EditorBindingManager {
 
       const target = entry.ytext.toString();
       entry.lastAgreedText = target;
+      // Minimal diff instead of a whole-document replace: a full replace
+      // forces a complete re-parse/re-highlight (a visible hitch, worst on
+      // phones) and loses the scroll position.
       cm.dispatch({
-        ...(target !== typedText
-          ? { changes: { from: 0, to: cm.state.doc.length, insert: target } }
-          : {}),
+        changes: diffToChanges(typedText, target),
         effects: this.compartment.reconfigure([
           // No awareness → yCollab skips its widget-based remote cursors,
           // which leave paint artifacts when Obsidian re-styles lines

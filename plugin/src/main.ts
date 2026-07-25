@@ -359,6 +359,9 @@ export default class CoeditPlugin extends Plugin {
       new Notice(`Coedit: "${config.localPath}" offline — ${err instanceof Error ? err.message : err}`);
     }
     this.bindings.scan();
+    // Warm the per-note IndexedDB state in the background so first opens
+    // are as fast as repeat opens.
+    void folder.prewarmDocs();
     return folder;
   }
 

@@ -51,3 +51,46 @@ export function mergeTypedEdits(
   const [merged] = dmp.patch_apply(patches, ytext.toString());
   applyDiskDiff(doc, ytext, merged);
 }
+
+/**
+ * Minimal CodeMirror change spec turning `fromText` into `toText`, via
+ * diff-match-patch. Replacing a whole document on editor attach forces a
+ * full re-parse/re-highlight (a visible hitch, worst on phones) and loses
+ * the scroll position; dispatching only the changed ranges doesn't.
+ */
+export function diffToChanges(
+  fromText: string,
+  toText: string,
+): Array<{ from: number; to: number; insert: string }> {
+  if (fromText === toText) return [];
+  const dmp = new DiffMatchPatch();
+  const diffs = dmp.diff_main(fromText, toText);
+  dmp.diff_cleanupSemantic(diffs);
+  const changes: Array<{ from: number; to: number; insert: string }> = [];
+  let pos = 0;
+  let pendingInsert: string | null = null;
+  for (const [op, text] of diffs) {
+    if (op === DiffMatchPatch.DIFF_EQUAL) {
+      if (pendingInsert !== null) {
+        changes.push({ from: pos, to: pos, insert: pendingInsert });
+        pendingInsert = null;
+      }
+      pos += text.length;
+    } else if (op === DiffMatchPatch.DIFF_DELETE) {
+      changes.push({ from: pos, to: pos + text.length, insert: pendingInsert ?? "" });
+      pendingInsert = null;
+      pos += text.length;
+    } else {
+      // Insert: hold it in case a delete follows at the same position (a
+      // replace); positions are in the ORIGINAL document for CM changespecs.
+      if (pendingInsert !== null) {
+        changes.push({ from: pos, to: pos, insert: pendingInsert });
+      }
+      pendingInsert = text;
+    }
+  }
+  if (pendingInsert !== null) {
+    changes.push({ from: pos, to: pos, insert: pendingInsert });
+  }
+  return changes;
+}

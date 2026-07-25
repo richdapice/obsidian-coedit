@@ -34,6 +34,10 @@ export interface DocEntry {
 }
 
 const RECENT_HASHES_MAX = 64;
+/** How long a closed note's socket stays warm for a quick return. */
+const LINGER_MS = 5 * 60 * 1000;
+/** Cap on warm sockets held for closed notes. */
+const LINGER_MAX = 8;
 
 /**
  * Per-file Y.Docs, keyed by guid, each persisted to IndexedDB so offline
@@ -49,6 +53,8 @@ export class DocManager {
   private entries = new Map<string, DocEntry>();
   private idbs = new Map<string, IndexeddbPersistence>();
   private locks = new Map<string, Promise<unknown>>();
+  /** guid → teardown timer for sockets lingering after their editor closed. */
+  private lingerTimers = new Map<string, number>();
   private destroyed = false;
 
   constructor(
@@ -125,6 +131,12 @@ export class DocManager {
   /** Create/ensure the live connection for a doc some ref-holder opened. */
   ensureProvider(guid: string): DocEntry {
     const entry = this.get(guid);
+    // Reconnecting to a lingering socket: cancel its teardown.
+    const linger = this.lingerTimers.get(guid);
+    if (linger !== undefined) {
+      window.clearTimeout(linger);
+      this.lingerTimers.delete(guid);
+    }
     if (!entry.provider) {
       entry.provider = createProvider(this.getSettings(), roomName(this.folderId, guid), entry.doc);
     }
@@ -142,21 +154,53 @@ export class DocManager {
     return entry;
   }
 
-  /** An editor closed the file: drop the socket when nobody is looking. */
+  /**
+   * An editor closed the file. The socket LINGERS for a few minutes instead
+   * of closing immediately: users bounce between recently-viewed notes, and
+   * reconnecting pays a TLS + Durable Object wake + sync round-trip that
+   * shows up as open-lag (worst on phones). Idle sockets cost nothing
+   * (hibernation-friendly: no keepalive traffic).
+   */
   release(guid: string): void {
     const entry = this.entries.get(guid);
     if (!entry || entry.refs === 0) return;
     entry.refs--;
-    if (entry.refs === 0) {
-      if (entry.provider) {
-        entry.provider.destroy();
-        entry.provider = null;
-      }
-      if (entry.historyObserver) {
-        entry.doc.off("update", entry.historyObserver);
-        entry.historyObserver = undefined;
-        entry.recentTextHashes = [];
-      }
+    if (entry.refs === 0 && entry.provider) {
+      this.scheduleLinger(guid);
+    }
+  }
+
+  private scheduleLinger(guid: string): void {
+    const existing = this.lingerTimers.get(guid);
+    if (existing !== undefined) window.clearTimeout(existing);
+    this.lingerTimers.set(
+      guid,
+      window.setTimeout(() => {
+        this.lingerTimers.delete(guid);
+        this.teardownProvider(guid);
+      }, LINGER_MS),
+    );
+    // Bound the number of warm sockets: tear down the oldest extras now.
+    while (this.lingerTimers.size > LINGER_MAX) {
+      const oldest = this.lingerTimers.keys().next().value as string;
+      const timer = this.lingerTimers.get(oldest);
+      if (timer !== undefined) window.clearTimeout(timer);
+      this.lingerTimers.delete(oldest);
+      this.teardownProvider(oldest);
+    }
+  }
+
+  private teardownProvider(guid: string): void {
+    const entry = this.entries.get(guid);
+    if (!entry || entry.refs > 0) return;
+    if (entry.provider) {
+      entry.provider.destroy();
+      entry.provider = null;
+    }
+    if (entry.historyObserver) {
+      entry.doc.off("update", entry.historyObserver);
+      entry.historyObserver = undefined;
+      entry.recentTextHashes = [];
     }
   }
 
@@ -174,6 +218,11 @@ export class DocManager {
   evictIfClosed(guid: string): void {
     const entry = this.entries.get(guid);
     if (!entry || entry.refs > 0) return;
+    const linger = this.lingerTimers.get(guid);
+    if (linger !== undefined) {
+      window.clearTimeout(linger);
+      this.lingerTimers.delete(guid);
+    }
     entry.provider?.destroy();
     void this.idbs.get(guid)?.destroy();
     entry.doc.destroy();
@@ -201,6 +250,10 @@ export class DocManager {
 
   destroy(): void {
     this.destroyed = true;
+    for (const timer of this.lingerTimers.values()) {
+      window.clearTimeout(timer);
+    }
+    this.lingerTimers.clear();
     for (const idb of this.idbs.values()) {
       void idb.destroy();
     }
