@@ -168,3 +168,32 @@ describe("mergeTypedEdits all-or-nothing", () => {
     expect(ytext.toString()).toBe(before);
   });
 });
+
+describe("diff performance on checklist-heavy notes", () => {
+  it("folds two large divergent checklists fast and exactly", async () => {
+    const Y = await import("yjs");
+    const { applyDiskDiff } = await import("../src/disk-sync");
+    const mkList = (seed: string, n: number) =>
+      Array.from({ length: n }, (_, i) => `- [ ] ${seed} item ${i} with some shared phrasing`).join("\n");
+    const doc = new Y.Doc();
+    const ytext = doc.getText("contents");
+    ytext.insert(0, `# Packing\n${mkList("alpha", 120)}\n`);
+    const disk = `# Itinerary\n${mkList("bravo", 120)}\n`;
+    const t0 = performance.now();
+    applyDiskDiff(doc, ytext, disk);
+    const elapsed = performance.now() - t0;
+    expect(ytext.toString()).toBe(disk);
+    // Char-level dmp hit its 1s internal timeout on inputs like this (the
+    // measured tab-switch freeze); line-first must stay well under it.
+    expect(elapsed).toBeLessThan(500);
+  });
+});
+
+describe("isWholesaleChange line-mode edge", () => {
+  it("does not flag a mass checkbox toggle (small edit on every line)", async () => {
+    const { isWholesaleChange } = await import("../src/disk-sync");
+    const unchecked = Array.from({ length: 40 }, (_, i) => `- [ ] packing item number ${i}`).join("\n");
+    const checked = unchecked.replaceAll("- [ ]", "- [x]");
+    expect(isWholesaleChange(unchecked, checked)).toBe(false);
+  });
+});

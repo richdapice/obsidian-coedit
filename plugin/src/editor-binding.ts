@@ -122,6 +122,12 @@ export class EditorBindingManager {
           baseText !== docText &&
           contentHash(baseText) !== agreedHash
         ) {
+          // Divergence at open should be the exception (offline edits, first
+          // open after an external write) — if it shows up on EVERY open,
+          // something upstream stopped recording agreement; leave a scent.
+          console.debug(
+            `coedit: attach fold ${path}: editor=${baseText.length} doc=${docText.length} agreed=${agreedHash === undefined ? "none" : "stale"}`,
+          );
           if (agreedHash !== undefined && contentHash(docText) === agreedHash) {
             // The doc still sits at the last disk agreement, so the editor
             // text is that state plus offline edits — equality-fold captures
