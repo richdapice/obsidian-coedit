@@ -124,3 +124,47 @@ describe("diffToChanges", () => {
     }
   });
 });
+
+describe("isWholesaleChange", () => {
+  it("flags a near-total replacement", async () => {
+    const { isWholesaleChange } = await import("../src/disk-sync");
+    const packing = "# Packing\n" + "- socks\n- shirts\n- chargers\n".repeat(30);
+    const tickets = "# Ticket Watch\n" + "- USJ express pass\n- teamLab slots\n".repeat(30);
+    expect(isWholesaleChange(packing, tickets)).toBe(true);
+  });
+  it("does not flag ordinary edits or short docs", async () => {
+    const { isWholesaleChange } = await import("../src/disk-sync");
+    const doc = "# Notes\n" + "line of steady content here\n".repeat(40);
+    expect(isWholesaleChange(doc, doc + "one new line\n")).toBe(false);
+    expect(isWholesaleChange("tiny", "different")).toBe(false);
+  });
+});
+
+describe("mergeTypedEdits all-or-nothing", () => {
+  it("returns true and merges when patches place cleanly", async () => {
+    const Y = await import("yjs");
+    const { mergeTypedEdits } = await import("../src/disk-sync");
+    const doc = new Y.Doc();
+    const ytext = doc.getText("contents");
+    ytext.insert(0, "alpha\nbravo\ncharlie\n");
+    // Remote edit already in the doc:
+    ytext.insert(0, "REMOTE\n");
+    const ok = mergeTypedEdits(doc, ytext, "alpha\nbravo\ncharlie\n", "alpha\nbravo EDIT\ncharlie\n");
+    expect(ok).toBe(true);
+    expect(ytext.toString()).toBe("REMOTE\nalpha\nbravo EDIT\ncharlie\n");
+  });
+
+  it("leaves the doc untouched and returns false when a patch cannot place", async () => {
+    const Y = await import("yjs");
+    const { mergeTypedEdits } = await import("../src/disk-sync");
+    const doc = new Y.Doc();
+    const ytext = doc.getText("contents");
+    ytext.insert(0, "completely unrelated document text with nothing in common at all\n".repeat(4));
+    const before = ytext.toString();
+    const base = "the quick brown fox\njumps over\nthe lazy dog\n";
+    const typed = "the quick brown fox\njumps over EDIT\nthe lazy dog\n";
+    const ok = mergeTypedEdits(doc, ytext, base, typed);
+    expect(ok).toBe(false);
+    expect(ytext.toString()).toBe(before);
+  });
+});

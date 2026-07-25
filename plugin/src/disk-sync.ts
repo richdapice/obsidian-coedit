@@ -38,18 +38,25 @@ export function applyDiskDiff(doc: Y.Doc, ytext: Y.Text, diskText: string): void
  * Y.Text that may meanwhile contain remote edits. The typed delta is
  * expressed as fuzzy patches and re-applied against the current CRDT text,
  * so remote edits survive; overlapping edits resolve in the typist's favor.
+ *
+ * All-or-nothing: if ANY patch fails to place, the Y.Text is left untouched
+ * and false is returned. Applying a partial merge and retrying later would
+ * re-apply the already-placed patches (their context now matches) and
+ * duplicate the edit — the caller must handle false (conflict copy, warn).
  */
 export function mergeTypedEdits(
   doc: Y.Doc,
   ytext: Y.Text,
   baseText: string,
   typedText: string,
-): void {
-  if (baseText === typedText) return;
+): boolean {
+  if (baseText === typedText) return true;
   const dmp = new DiffMatchPatch();
   const patches = dmp.patch_make(baseText, typedText);
-  const [merged] = dmp.patch_apply(patches, ytext.toString());
+  const [merged, results] = dmp.patch_apply(patches, ytext.toString());
+  if (!results.every(Boolean)) return false;
   applyDiskDiff(doc, ytext, merged);
+  return true;
 }
 
 /**
@@ -93,4 +100,24 @@ export function diffToChanges(
     changes.push({ from: pos, to: pos, insert: pendingInsert });
   }
   return changes;
+}
+
+/**
+ * Does turning `before` into `after` replace most of the document? Used as a
+ * tripwire: wholesale replacements are occasionally legitimate (a script
+ * rewriting a generated note) but are also the signature of paste-into-the-
+ * wrong-note accidents and cross-write bugs — they should never be silent.
+ */
+export function isWholesaleChange(before: string, after: string): boolean {
+  if (before.length < 500) return false;
+  const dmp = new DiffMatchPatch();
+  const diffs = dmp.diff_main(before, after);
+  // Without semantic cleanup, unrelated texts still share enough scattered
+  // characters that the kept ratio never drops below the threshold.
+  dmp.diff_cleanupSemantic(diffs);
+  let kept = 0;
+  for (const [op, text] of diffs) {
+    if (op === DiffMatchPatch.DIFF_EQUAL) kept += text.length;
+  }
+  return kept / before.length < 0.3;
 }

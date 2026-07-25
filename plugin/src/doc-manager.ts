@@ -31,6 +31,14 @@ export interface DocEntry {
   recentTextHashes: string[];
   /** Doc-update observer feeding recentTextHashes; active while connected. */
   historyObserver?: () => void;
+  /**
+   * Number of editor bindings currently INSTALLED (yCollab dispatched) — a
+   * count, not a flag, because split panes bind the same doc twice. During
+   * an attach's pre-bind window refs > 0 but boundCount is 0 — saves
+   * arriving then belong to attach's own locked fold, and merging them
+   * elsewhere would apply the same delta twice.
+   */
+  boundCount: number;
 }
 
 const RECENT_HASHES_MAX = 64;
@@ -90,6 +98,7 @@ export class DocManager {
         loaded: false,
         ready: Promise.resolve(), // replaced below; entry must exist first
         recentTextHashes: [],
+        boundCount: 0,
       };
       // A doc destroyed mid-load suppresses idb's synced event; without a
       // timeout an attach would hang on `ready` forever. Only the REAL load
@@ -114,6 +123,15 @@ export class DocManager {
       this.entries.set(guid, entry);
     }
     return entry;
+  }
+
+  /**
+   * Whether a live socket is attached (open editor OR post-close linger).
+   * A doc with a provider receives remote updates continuously, so the
+   * closed-file pipeline must not treat its ytext as an offline snapshot.
+   */
+  hasProvider(guid: string): boolean {
+    return this.entries.get(guid)?.provider != null;
   }
 
   /**
@@ -177,7 +195,7 @@ export class DocManager {
       guid,
       window.setTimeout(() => {
         this.lingerTimers.delete(guid);
-        this.teardownProvider(guid);
+        void this.lockedTeardown(guid);
       }, LINGER_MS),
     );
     // Bound the number of warm sockets: tear down the oldest extras now.
@@ -186,13 +204,36 @@ export class DocManager {
       const timer = this.lingerTimers.get(oldest);
       if (timer !== undefined) window.clearTimeout(timer);
       this.lingerTimers.delete(oldest);
-      this.teardownProvider(oldest);
+      void this.lockedTeardown(oldest);
     }
+  }
+
+  /**
+   * Teardown must not interleave with an in-flight syncClosedFile: that
+   * pipeline checks hasProvider()/recentTextHashes across awaits, and a
+   * teardown landing mid-run would flip its merge decision under it.
+   */
+  private lockedTeardown(guid: string): Promise<void> {
+    return this.withLock(guid, async () => {
+      // While we waited for the lock, a new editor may have grabbed the doc,
+      // or a reopen/close cycle may have scheduled a fresh linger.
+      if (this.isOpen(guid) || this.lingerTimers.has(guid)) return;
+      this.teardownProvider(guid);
+    }).catch((err) => {
+      console.warn(`coedit: provider teardown failed for ${guid.slice(0, 8)}`, err);
+    });
   }
 
   private teardownProvider(guid: string): void {
     const entry = this.entries.get(guid);
     if (!entry || entry.refs > 0) return;
+    entry.boundCount = 0;
+    // Known residual corner: lastAgreedText survives teardown as the merge
+    // base for later disk edits. If a stale autosave echo is still on disk
+    // when the ring clears below (requires the echo's own sync round to have
+    // been skipped or to have failed), the next sync can re-merge it. The
+    // window is a double failure inside one linger; the conflict-copy path
+    // bounds the damage.
     if (entry.provider) {
       entry.provider.destroy();
       entry.provider = null;

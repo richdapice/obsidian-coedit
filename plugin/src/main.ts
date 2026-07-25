@@ -6,6 +6,7 @@ import { EditorBindingManager } from "./editor-binding";
 import { InviteModal, JoinFolderModal, ShareFolderModal } from "./modals";
 import { isLocalHost, roomName } from "./net";
 import { base64UrlEncode, hmacHex, isInviteToken, isReadOnlyToken, isUnder } from "./paths";
+import { PerfLogModal } from "./perf";
 import { FollowManager, jumpToPeer, PeerSuggestModal, PresenceManager } from "./presence";
 import { showVersionHistory } from "./version-history";
 import {
@@ -151,6 +152,11 @@ export default class CoeditPlugin extends Plugin {
           new Notice("Coedit: public link copied. Anyone with the link can read this note.");
         })();
       },
+    });
+    this.addCommand({
+      id: "show-performance-log",
+      name: "Show performance log",
+      callback: () => new PerfLogModal(this.app).open(),
     });
     this.addCommand({
       id: "jump-to-collaborator",
