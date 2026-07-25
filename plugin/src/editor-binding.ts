@@ -1,6 +1,6 @@
 import { Compartment, type Extension, Prec } from "@codemirror/state";
 import { type EditorView, keymap } from "@codemirror/view";
-import { editorInfoField, type MarkdownView, Notice } from "obsidian";
+import { editorInfoField, type MarkdownView, Notice, TFile } from "obsidian";
 import { yCollab, yUndoManagerKeymap } from "y-codemirror.next";
 import { whenSynced } from "./collab";
 import { commentsExtension } from "./comments";
@@ -33,6 +33,8 @@ interface BindToken {
 export class EditorBindingManager {
   private compartment = new Compartment();
   private bound = new WeakMap<EditorView, BindToken>();
+  /** Consecutive settle-gate retries per editor; reset on any other outcome. */
+  private settleRetries = new WeakMap<EditorView, number>();
 
   constructor(private plugin: CoeditPlugin) {}
 
@@ -104,17 +106,39 @@ export class EditorBindingManager {
       // Everything from fold to bind runs in ONE lock hold: an unlocked gap
       // between them lets a queued save (onLocalModify) merge a delta the
       // bind-time merge below re-applies from its own snapshot — duplicated
-      // text for every peer. Snapshot and validate INSIDE the lock: Obsidian
-      // swaps the editor's content to a new file before the file-open event
-      // fires, so a pre-lock snapshot can be a DIFFERENT note's text —
-      // folding that in was the note-corruption bug.
+      // text for every peer.
       let bound = false;
+      let unsettled = false;
       await folder.docs.withLock(guid, async () => {
         tracer.mark("lock-wait");
         if (stale()) return;
         const info = cm.state.field(editorInfoField, false);
         if (info?.file?.path !== path) return;
+
+        // THE load-bearing guard (July 22 + July 25 incidents): during a
+        // tab switch Obsidian can update editorInfoField's file BEFORE it
+        // swaps the editor's content, so a path check alone still reads the
+        // PREVIOUS note's text — folding that in rewrote whole notes with a
+        // neighboring note's content. Never trust the editor until its text
+        // matches the file on disk; until then, bail and let the rescan
+        // below retry once the swap lands.
+        const af = this.plugin.app.vault.getAbstractFileByPath(path);
+        if (!(af instanceof TFile)) return;
+        const diskText = await this.plugin.app.vault.cachedRead(af);
+        if (stale()) return;
+        const infoAfterRead = cm.state.field(editorInfoField, false);
+        if (infoAfterRead?.file?.path !== path) return;
         const baseText = cm.state.doc.toString();
+        // CM6 always joins lines with \n while cachedRead returns raw bytes;
+        // without normalization a CRLF file could never pass the gate and
+        // the retry below would spin forever.
+        const normalize = (s: string) => s.replace(/\r\n?/g, "\n");
+        if (normalize(baseText) !== normalize(diskText)) {
+          // Not yet swapped — or unsaved typing racing the attach. Either
+          // way this text has no provable relationship to `path`.
+          unsettled = true;
+          return;
+        }
         const docText = entry.ytext.toString();
         const agreedHash = folder.syncState.get(guid);
         if (
@@ -235,7 +259,26 @@ export class EditorBindingManager {
         entry.boundCount++;
         bound = true;
       });
-      if (!bound) return bail();
+      if (!bound) {
+        bail();
+        // Editor mid-swap: retry shortly — the content usually lands within
+        // a frame or two, and scan() no-ops once it has. Backoff + cap so a
+        // permanently mismatched editor can't spin; the next natural
+        // file-open/layout-change scan starts a fresh attempt series.
+        if (unsettled) {
+          const n = (this.settleRetries.get(cm) ?? 0) + 1;
+          this.settleRetries.set(cm, n);
+          if (n <= 20) {
+            window.setTimeout(() => this.scan(), 150 + n * 50);
+          } else if (n === 21) {
+            console.warn(`coedit: editor for ${path} never matched disk; leaving unbound (closed-file sync still active)`);
+          }
+        } else {
+          this.settleRetries.delete(cm);
+        }
+        return;
+      }
+      this.settleRetries.delete(cm);
       ownsRef = false;
     } catch (err) {
       // Fail closed: never leave an active-looking token with no binding —
