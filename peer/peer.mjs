@@ -16,6 +16,7 @@ import {
   DAILY_CAP,
   MAX_REPLY_CHARS,
   claimReply,
+  contentHash,
   findUnansweredMentions,
   systemPrompt,
 } from "../shared/mentions.mjs";
@@ -212,6 +213,17 @@ class FolderSession {
       await new Promise((r) => setTimeout(r, TYPE_INTERVAL_MS));
     }
     reply.update(answer);
+    // Advertise the new content in the index: closed notes on other devices
+    // only pull when the map hash moves — without this, replies to notes
+    // nobody has open stay invisible until the note is next opened.
+    const meta = this.files.get(entry.path);
+    if (meta) {
+      this.files.set(entry.path, {
+        ...meta,
+        hash: contentHash(ytext.toString()),
+        mtime: Date.now(),
+      });
+    }
     log(`answered in ${entry.path} (${answer.length} chars)`);
     return true;
   }
