@@ -1,3 +1,4 @@
+import Anthropic from "@anthropic-ai/sdk";
 import * as encoding from "lib0/encoding";
 import { marked } from "marked";
 import {
@@ -8,6 +9,12 @@ import {
 } from "partyserver";
 import { YServer } from "y-partyserver";
 import * as Y from "yjs";
+import {
+  MAX_REPLY_CHARS,
+  claimReply,
+  findUnansweredMentions,
+  systemPrompt,
+} from "../../shared/mentions.mjs";
 
 // Snapshots are chunked across storage keys: a single Durable Object storage
 // value is capped at 2 MiB, and Yjs state grows monotonically.
@@ -36,6 +43,21 @@ const MESSAGE_QUERY_AWARENESS = 3;
 /** Ghost-peer sweep cadence: how often to poke sockets while any exist. */
 const SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 
+// ---- @claude peer (Durable-Object brain) --------------------------------
+// Fallback responder: answers @claude mentions ONLY when (a) an
+// ANTHROPIC_API_KEY secret is configured and (b) the Mac daemon brain has
+// not heartbeated recently (it holds priority — subscription-billed, richer
+// capabilities). Without a key this code is fully dormant.
+const PEER_HEARTBEAT_KEY = "peer:heartbeat";
+/** Daemon considered offline after this long without a heartbeat. */
+const PEER_HEARTBEAT_TTL_MS = 5 * 60 * 1000;
+/** Debounce between a doc update and the mention scan. */
+const PEER_SCAN_DELAY_MS = 2000;
+/** Per-doc daily API-call cap (each DO only sees its own doc; the global
+ *  50/day cap is the daemon's job — this bounds the metered fallback). */
+const PEER_DOC_DAILY_CAP = 10;
+const PEER_MODEL = "claude-opus-4-8";
+
 export class YDocServer extends YServer<Env> {
   static options = { hibernate: true };
 
@@ -47,6 +69,117 @@ export class YDocServer extends YServer<Env> {
     // later — ask every surviving socket to re-announce itself.
     this.queryAwareness();
     await this.scheduleSweep();
+    this.installMentionResponder();
+  }
+
+  // ---- @claude fallback brain -------------------------------------------
+
+  private peerScanTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Mentions currently being answered (prompt text), so one update storm
+   *  can't double-answer within this isolate's lifetime. */
+  private peerBusy = new Set<string>();
+
+  /** Content docs only; the index doc holds the file map, never prose. */
+  private isContentDoc(): boolean {
+    return this.name.includes(":") && !this.name.endsWith(":index");
+  }
+
+  private installMentionResponder(): void {
+    if (!this.isContentDoc() || !this.env.ANTHROPIC_API_KEY) return;
+    this.document.getText("contents").observe(() => {
+      if (this.peerScanTimer) clearTimeout(this.peerScanTimer);
+      this.peerScanTimer = setTimeout(() => {
+        this.peerScanTimer = null;
+        this.ctx.waitUntil(
+          this.respondToMentions().catch((err) => {
+            console.error(`claude peer failed in ${this.name}`, err);
+          }),
+        );
+      }, PEER_SCAN_DELAY_MS);
+    });
+  }
+
+  private async respondToMentions(): Promise<void> {
+    const apiKey = this.env.ANTHROPIC_API_KEY;
+    if (!apiKey) return;
+    // The daemon brain has priority whenever it is alive.
+    const beat = await this.ctx.storage.get<number>(PEER_HEARTBEAT_KEY);
+    if (beat !== undefined && Date.now() - beat < PEER_HEARTBEAT_TTL_MS) return;
+
+    const ytext = this.document.getText("contents");
+    // Re-scan after every answer (replies shift later mentions' offsets),
+    // but give each prompt ONE attempt per pass regardless of outcome — a
+    // raced or duplicate mention must not spin this loop.
+    const handled = new Set<string>();
+    for (;;) {
+      const mention = findUnansweredMentions(ytext.toString()).find(
+        (m) => !this.peerBusy.has(m.prompt) && !handled.has(m.prompt),
+      );
+      if (!mention) return;
+      handled.add(mention.prompt);
+      this.peerBusy.add(mention.prompt);
+      try {
+        await this.answerMention(apiKey, mention.prompt);
+      } catch (err) {
+        console.error(`claude peer answer failed in ${this.name}`, err);
+      } finally {
+        this.peerBusy.delete(mention.prompt);
+      }
+    }
+  }
+
+  private async answerMention(apiKey: string, prompt: string): Promise<void> {
+    const ytext = this.document.getText("contents");
+    const reply = claimReply(this.document, ytext, prompt, "do");
+    if (!reply) return;
+    // Let a racing daemon claim propagate; keep only the first block.
+    await new Promise((r) => setTimeout(r, 2500));
+    if (!reply.ownsClaim()) return;
+
+    // Metered call is now certain — count it. Per-doc cap; yesterday's
+    // counter is dropped as the day rolls over.
+    const day = new Date().toISOString().slice(0, 10);
+    const capKey = `peer:apiCount:${day}`;
+    const used = (await this.ctx.storage.get<number>(capKey)) ?? 0;
+    if (used >= PEER_DOC_DAILY_CAP) {
+      console.warn(`claude peer cap reached for ${this.name}`);
+      reply.update("⚠️ Claude's daily budget for this note is used up — try again tomorrow.");
+      return;
+    }
+    const stale = [...(await this.ctx.storage.list({ prefix: "peer:apiCount:" })).keys()].filter(
+      (k) => k !== capKey,
+    );
+    if (stale.length > 0) await this.ctx.storage.delete(stale);
+    await this.ctx.storage.put(capKey, used + 1);
+
+    const noteText = ytext.toString();
+    const client = new Anthropic({ apiKey });
+    try {
+      const stream = client.messages.stream({
+        model: PEER_MODEL,
+        max_tokens: 2000,
+        thinking: { type: "adaptive" },
+        system: systemPrompt(null),
+        messages: [{ role: "user", content: noteText }],
+      });
+      let answer = "";
+      let flushed = 0;
+      for await (const event of stream) {
+        if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
+          answer += event.delta.text;
+          if (answer.length >= MAX_REPLY_CHARS) break;
+          if (answer.length - flushed >= 120) {
+            reply.update(answer);
+            flushed = answer.length;
+          }
+        }
+      }
+      reply.update(answer);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message.split("\n")[0] : String(err);
+      reply.update(`⚠️ Claude couldn't answer: ${msg}`);
+      throw err;
+    }
   }
 
   override async onConnect(connection: Connection, ctx: ConnectionContext): Promise<void> {
@@ -63,6 +196,15 @@ export class YDocServer extends YServer<Env> {
   override async onAlarm(): Promise<void> {
     this.queryAwareness();
     await this.scheduleSweep();
+    // Mentions left unanswered while the daemon was alive-but-dying have no
+    // update to re-trigger a scan; the sweep doubles as a retry tick.
+    if (this.isContentDoc() && this.env.ANTHROPIC_API_KEY) {
+      this.ctx.waitUntil(
+        this.respondToMentions().catch((err) => {
+          console.error(`claude peer alarm scan failed in ${this.name}`, err);
+        }),
+      );
+    }
   }
 
   private queryAwareness(): void {
@@ -172,6 +314,14 @@ export class YDocServer extends YServer<Env> {
         }
         return new Response(null, { status: 204 });
       }
+    }
+
+    // Daemon liveness beacon. Any room accepts it (the daemon posts to every
+    // doc it watches) — a fresh beat tells this DO's fallback brain to stay
+    // quiet because the subscription-billed daemon will answer instead.
+    if (url.pathname.endsWith("/peer-heartbeat") && request.method === "POST") {
+      await this.ctx.storage.put(PEER_HEARTBEAT_KEY, Date.now());
+      return new Response(null, { status: 204 });
     }
 
     if (url.pathname.endsWith("/checkpoints")) {

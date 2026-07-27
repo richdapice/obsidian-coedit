@@ -4,6 +4,7 @@
 interface __BaseEnv_Env {
 	BLOBS: R2Bucket;
 	SHARED_SECRET: string;
+	ANTHROPIC_API_KEY?: string;
 	YDocServer: DurableObjectNamespace<import("./src/index").YDocServer>;
 }
 declare namespace Cloudflare {
