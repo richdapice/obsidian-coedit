@@ -18,6 +18,103 @@ const DIFF_TIMEOUT_S = 0.2;
  *  no granularity worth preserving and char-diffing it is the slow case). */
 const REFINE_MAX_CHARS = 3000;
 
+const isHighSurrogate = (c: string) => c >= "\uD800" && c <= "\uDBFF";
+const isLowSurrogate = (c: string) => c >= "\uDC00" && c <= "\uDFFF";
+
+/** True if the string contains half of a surrogate pair (a mangled emoji). */
+export function hasLoneSurrogate(s: string): boolean {
+  for (let i = 0; i < s.length; i++) {
+    if (isHighSurrogate(s[i])) {
+      if (i + 1 >= s.length || !isLowSurrogate(s[i + 1])) return true;
+      i++;
+    } else if (isLowSurrogate(s[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * dmp diffs at UTF-16 indices and happily puts an op boundary in the middle
+ * of an emoji (e.g. 🍣→🍜 share a high surrogate, so it lands in the EQUAL
+ * run). Reconstruction is still exact, but the individual CRDT ops then
+ * insert/delete half-pairs — and a peer's concurrent edit merging between
+ * them yields permanently mangled emoji (the July 2026 "question marks"
+ * damage). Rebalance: a trailing high surrogate on an EQUAL run moves into
+ * the start of every change op that follows it; a leading low surrogate on
+ * an EQUAL run moves onto the end of every change op before it. Both sides
+ * of the reconstruction are preserved, and every op begins/ends on a whole
+ * character.
+ *
+ * INVARIANT: a change group (the ops between two EQUALs) holds at most one
+ * DELETE and one INSERT — guaranteed by dmp's cleanupMerge normalization and
+ * preserved by lineDiff's refine splice. "Move into every op of the group"
+ * would DUPLICATE the char into a reconstruction if a group ever held two
+ * ops of the same kind.
+ */
+export function healSplitSurrogates(diffs: Array<[number, string]>): Array<[number, string]> {
+  const EQ = DiffMatchPatch.DIFF_EQUAL;
+  const DEL = DiffMatchPatch.DIFF_DELETE;
+  const INS = DiffMatchPatch.DIFF_INSERT;
+  for (let i = 0; i < diffs.length; i++) {
+    if (diffs[i][0] !== EQ) continue;
+
+    // Trailing high surrogate: move it into the change group that follows.
+    // The char leaves BOTH reconstructions (source and target), so both a
+    // DELETE and an INSERT must receive it — create whichever is missing
+    // (e.g. a pure-delete group straddling the pair would otherwise drop
+    // the surviving emoji from the target).
+    let text = diffs[i][1];
+    if (text.length > 0 && isHighSurrogate(text[text.length - 1]) && i + 1 < diffs.length) {
+      const hi = text[text.length - 1];
+      diffs[i] = [EQ, text.slice(0, -1)];
+      let end = i + 1;
+      let hasDel = false;
+      let hasIns = false;
+      while (end < diffs.length && diffs[end][0] !== EQ) {
+        if (diffs[end][0] === DEL) hasDel = true;
+        else hasIns = true;
+        end++;
+      }
+      if (!hasDel) {
+        diffs.splice(i + 1, 0, [DEL, ""]);
+        end++;
+      }
+      if (!hasIns) {
+        diffs.splice(i + 1, 0, [INS, ""]);
+        end++;
+      }
+      for (let k = i + 1; k < end; k++) diffs[k] = [diffs[k][0], hi + diffs[k][1]];
+    }
+
+    // Leading low surrogate: move it into the change group before, same
+    // both-sides rule.
+    text = diffs[i][1];
+    if (text.length > 0 && isLowSurrogate(text[0]) && i > 0) {
+      const lo = text[0];
+      diffs[i] = [EQ, text.slice(1)];
+      let start = i - 1;
+      let hasDel = false;
+      let hasIns = false;
+      while (start >= 0 && diffs[start][0] !== EQ) {
+        if (diffs[start][0] === DEL) hasDel = true;
+        else hasIns = true;
+        start--;
+      }
+      if (!hasDel) {
+        diffs.splice(i, 0, [DEL, ""]);
+        i++;
+      }
+      if (!hasIns) {
+        diffs.splice(i, 0, [INS, ""]);
+        i++;
+      }
+      for (let k = start + 1; k < i; k++) diffs[k] = [diffs[k][0], diffs[k][1] + lo];
+    }
+  }
+  return diffs.filter(([, t]) => t.length > 0);
+}
+
 /**
  * Line-first diff of a → b, with small changed spans re-diffed char-level.
  * The refinement is NOT cosmetic: whole-line delete+reinsert ops destroy the
@@ -51,7 +148,7 @@ function lineDiff(a: string, b: string): Array<[number, string]> {
       refined.push(diffs[i]);
     }
   }
-  return refined;
+  return healSplitSurrogates(refined);
 }
 
 /**
@@ -107,6 +204,13 @@ export function mergeTypedEdits(
   const patches = dmp.patch_make(baseText, typedText);
   const [merged, results] = dmp.patch_apply(patches, ytext.toString());
   if (!results.every(Boolean)) return false;
+  // Fuzzy placement can land a patch mid-emoji on a diverged doc, splicing
+  // half-pairs into the merge. Mangled output must never enter the CRDT —
+  // treat it as a failed merge (conflict-copy path) unless the inputs were
+  // already mangled to begin with.
+  if (hasLoneSurrogate(merged) && !hasLoneSurrogate(ytext.toString()) && !hasLoneSurrogate(typedText)) {
+    return false;
+  }
   applyDiskDiff(doc, ytext, merged);
   return true;
 }
@@ -128,8 +232,11 @@ export function diffToChanges(
   // cap bounds the pathological case.
   const dmp = new DiffMatchPatch();
   dmp.Diff_Timeout = DIFF_TIMEOUT_S;
-  const diffs = dmp.diff_main(fromText, toText);
-  dmp.diff_cleanupSemantic(diffs);
+  const rawDiffs = dmp.diff_main(fromText, toText);
+  dmp.diff_cleanupSemantic(rawDiffs);
+  // yCollab converts these CM changes into Y.Text ops, so mid-emoji
+  // boundaries carry the same concurrent-merge mangling hazard as folds.
+  const diffs = healSplitSurrogates(rawDiffs);
   const changes: Array<{ from: number; to: number; insert: string }> = [];
   let pos = 0;
   let pendingInsert: string | null = null;

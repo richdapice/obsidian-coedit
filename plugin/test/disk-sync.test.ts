@@ -197,3 +197,71 @@ describe("isWholesaleChange line-mode edge", () => {
     expect(isWholesaleChange(unchecked, checked)).toBe(false);
   });
 });
+
+describe("surrogate-pair safety", () => {
+  it("healSplitSurrogates rebalances a diff that splits an emoji", async () => {
+    const { healSplitSurrogates } = await import("../src/disk-sync");
+    // 🍣 (D83C DF63) -> 🍜 (D83C DF5C): naive char diff shares the high
+    // surrogate as an EQUAL run, splitting both emoji.
+    const raw: Array<[number, string]> = [
+      [0, "a \uD83C"],
+      [-1, "\uDF63"],
+      [1, "\uDF5C"],
+      [0, " b"],
+    ];
+    const healed = healSplitSurrogates(raw);
+    // Reconstruction identical on both sides:
+    const src = healed.filter(([op]) => op !== 1).map(([, t]) => t).join("");
+    const dst = healed.filter(([op]) => op !== -1).map(([, t]) => t).join("");
+    expect(src).toBe("a 🍣 b");
+    expect(dst).toBe("a 🍜 b");
+    // And no op starts or ends mid-pair:
+    const { hasLoneSurrogate } = await import("../src/disk-sync");
+    for (const [, t] of healed) expect(hasLoneSurrogate(t)).toBe(false);
+  });
+
+  it("applyDiskDiff replaces one emoji with another exactly", async () => {
+    const Y = await import("yjs");
+    const { applyDiskDiff } = await import("../src/disk-sync");
+    const doc = new Y.Doc();
+    const ytext = doc.getText("contents");
+    ytext.insert(0, "# 🍣 Sushi list\n- item one\n");
+    applyDiskDiff(doc, ytext, "# 🍜 Sushi list\n- item one\n");
+    expect(ytext.toString()).toBe("# 🍜 Sushi list\n- item one\n");
+  });
+
+  it("hasLoneSurrogate detects halves and passes whole pairs", async () => {
+    const { hasLoneSurrogate } = await import("../src/disk-sync");
+    expect(hasLoneSurrogate("plain 🍣 text 🇯🇵")).toBe(false);
+    expect(hasLoneSurrogate("broken \uD83C text")).toBe(true);
+    expect(hasLoneSurrogate("\uDF63 leading low")).toBe(true);
+  });
+});
+
+describe("healSplitSurrogates pure-delete straddle", () => {
+  it("preserves the surviving emoji when a deletion straddles split pairs", async () => {
+    const { healSplitSurrogates, hasLoneSurrogate } = await import("../src/disk-sync");
+    // "🍣🍜x" -> "🍜x": dmp yields EQ(hi) DEL(lo,hi) EQ(lo,"x")
+    const raw: Array<[number, string]> = [
+      [0, "\uD83C"],
+      [-1, "\uDF63\uD83C"],
+      [0, "\uDF5Cx"],
+    ];
+    const healed = healSplitSurrogates(raw);
+    const src = healed.filter(([op]) => op !== 1).map(([, t]) => t).join("");
+    const dst = healed.filter(([op]) => op !== -1).map(([, t]) => t).join("");
+    expect(src).toBe("🍣🍜x");
+    expect(dst).toBe("🍜x");
+    for (const [, t] of healed) expect(hasLoneSurrogate(t)).toBe(false);
+  });
+
+  it("applyDiskDiff handles emoji deletion adjacent to a kept emoji", async () => {
+    const Y = await import("yjs");
+    const { applyDiskDiff } = await import("../src/disk-sync");
+    const doc = new Y.Doc();
+    const ytext = doc.getText("contents");
+    ytext.insert(0, "🍣🍜 ramen day\n");
+    applyDiskDiff(doc, ytext, "🍜 ramen day\n");
+    expect(ytext.toString()).toBe("🍜 ramen day\n");
+  });
+});
