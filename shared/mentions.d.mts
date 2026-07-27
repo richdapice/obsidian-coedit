@@ -24,3 +24,4 @@ export declare function claimReply(
   prompt: string,
   brainId: string,
 ): ReplyHandle | null;
+export declare function contentHash(str: string): string;
