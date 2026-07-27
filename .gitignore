@@ -7,3 +7,6 @@ dev/vaults/
 plugin/main.js
 *.log
 .DS_Store
+peer/config.json
+peer/state.json
+.anthropic-key

@@ -63,3 +63,24 @@ Then in the plugin settings set the server host to
   3-way diff; overlapping edits resolve in favor of the disk/typist side.
 - Undo uses Y.UndoManager and may interact oddly with Obsidian's native
   history in edge cases.
+
+## @claude peer
+
+Mention `@claude` on any line of a shared note and a Claude collaborator
+answers in a quoted callout beneath it. Two interchangeable brains:
+
+- **Daemon** (`peer/`): runs on a Mac via launchd, answers through the local
+  `claude` CLI (subscription-billed). Copy `config.example.json` to
+  `config.json` (host, shared secret, folder ids, absolute `claudeBin`),
+  `npm install`, then load the plist (edit PEER_DIR placeholders first).
+- **Durable Object fallback** (server): dormant unless the
+  `ANTHROPIC_API_KEY` worker secret is set (`wrangler secret put
+  ANTHROPIC_API_KEY`, metered billing). It answers only when the daemon's
+  heartbeat has been quiet for 5 minutes, so the subscription brain always
+  wins while its Mac is awake.
+
+Protocol notes: replies are `> [!quote]` callouts carrying an ownership
+nonce; caps are 50/day (daemon) and 10/day per note (fallback); read-only
+invitees can't trigger answers (their connections can't write). Scripted
+notes that rewrite themselves (ticket watchers) re-ask on every rewrite if
+you put a mention in one — don't.

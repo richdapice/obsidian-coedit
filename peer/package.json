@@ -1,0 +1,14 @@
+{
+  "name": "coedit-peer",
+  "private": true,
+  "type": "module",
+  "description": "Coedit @claude peer daemon — answers mentions in shared folders via the local claude CLI",
+  "scripts": {
+    "start": "node peer.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.18.0",
+    "y-partyserver": "^2.2.0",
+    "yjs": "^13.6.31"
+  }
+}
