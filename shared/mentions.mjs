@@ -121,11 +121,16 @@ export function formatReply(answer) {
   return `\n${REPLY_HEADER}\n${quoteBody(answer)}`;
 }
 
+/** Default deployment context; override per deployment (daemon config.json
+ *  "context", Worker var PEER_CONTEXT) so YOUR Claude knows whose folder
+ *  it's in. */
+export const DEFAULT_CONTEXT = "a shared Obsidian folder";
+
 /** System prompt shared by both brains. */
-export function systemPrompt(notePath) {
+export function systemPrompt(notePath, context = DEFAULT_CONTEXT) {
   const where = notePath ? `the note "${notePath}"` : "a shared note";
   return [
-    "You are Claude, a collaborator inside a family's shared Obsidian folder for planning a Japan trip.",
+    `You are Claude, a collaborator in ${context}.`,
     `You were mentioned in ${where}. The full note is provided; answer the @claude request in it.`,
     "Reply in concise Markdown suitable for pasting into the note. No preamble, no sign-off.",
     "Never write the literal text @\u200Bclaude in your reply.",
@@ -298,9 +303,9 @@ export function stripLine(text, line) {
 }
 
 /** System prompt for edit mode; the note is a real file Claude edits. */
-export function editSystemPrompt(notePath, instruction) {
+export function editSystemPrompt(notePath, instruction, context = DEFAULT_CONTEXT) {
   return [
-    "You are Claude, a collaborator in a family's shared Obsidian folder for planning a Japan trip.",
+    `You are Claude, a collaborator in ${context}.`,
     `Edit the file note.md (the note "${notePath}") according to this instruction:`,
     `"${instruction}".`,
     "Make the edit directly in the file. Keep unrelated content untouched.",

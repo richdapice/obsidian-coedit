@@ -2,5 +2,6 @@
   "host": "coedit-sync.YOUR-SUBDOMAIN.workers.dev",
   "token": "YOUR-SHARED-SECRET",
   "folders": ["YOUR-FOLDER-ID"],
-  "claudeBin": "/usr/local/bin/claude"
+  "claudeBin": "/usr/local/bin/claude",
+  "context": "a shared Obsidian folder for my team's project notes"
 }
