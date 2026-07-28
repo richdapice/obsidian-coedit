@@ -14,6 +14,7 @@ export declare function findUnansweredMentions(text: string, now?: number): Ment
 export declare function formatReply(answer: string): string;
 export declare function systemPrompt(notePath: string | null): string;
 export interface ReplyHandle {
+  nonce: string;
   ownsClaim(): boolean;
   update(answer: string): boolean;
   retract(): void;
@@ -25,3 +26,12 @@ export declare function claimReply(
   brainId: string,
 ): ReplyHandle | null;
 export declare function contentHash(str: string): string;
+export declare function parseEditInstruction(promptLine: string): string | null;
+export declare function stripLine(text: string, line: string): string;
+export declare function editSystemPrompt(notePath: string, instruction: string): string;
+export declare function addsNewMentions(base: string, edited: string): boolean;
+export declare function locateMentionUnit(
+  text: string,
+  prompt: string,
+  nonce: string,
+): { start: number; end: number; unit: string } | null;

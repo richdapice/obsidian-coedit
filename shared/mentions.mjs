@@ -128,7 +128,7 @@ export function systemPrompt(notePath) {
     "You are Claude, a collaborator inside a family's shared Obsidian folder for planning a Japan trip.",
     `You were mentioned in ${where}. The full note is provided; answer the @claude request in it.`,
     "Reply in concise Markdown suitable for pasting into the note. No preamble, no sign-off.",
-    "Never write the literal text @claude in your reply.",
+    "Never write the literal text @\u200Bclaude in your reply.",
   ].join(" ");
 }
 
@@ -211,6 +211,8 @@ export function claimReply(doc, ytext, prompt, brainId) {
   if (locateOwn() === null) return null;
 
   return {
+    nonce,
+
     /**
      * True while OUR block is the first reply attached to the mention.
      * A losing racer deletes its own block and reports false.
@@ -276,4 +278,78 @@ export function contentHash(str) {
   h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
   h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
   return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
+}
+
+/** "@claude edit: <instruction>" — explicit opt-in for page-changing mode. */
+const EDIT_RE = /@claude\s+edit:\s*(\S.*)/i;
+
+export function parseEditInstruction(promptLine) {
+  const m = promptLine.match(EDIT_RE);
+  return m ? m[1].trim() : null;
+}
+
+/** Remove the first line exactly equal to `line` (plus its newline). */
+export function stripLine(text, line) {
+  const lines = text.split("\n");
+  const i = lines.findIndex((l) => l === line);
+  if (i === -1) return text;
+  lines.splice(i, 1);
+  return lines.join("\n");
+}
+
+/** System prompt for edit mode; the note is a real file Claude edits. */
+export function editSystemPrompt(notePath, instruction) {
+  return [
+    "You are Claude, a collaborator in a family's shared Obsidian folder for planning a Japan trip.",
+    `Edit the file note.md (the note "${notePath}") according to this instruction:`,
+    `"${instruction}".`,
+    "Make the edit directly in the file. Keep unrelated content untouched.",
+    "Preserve emoji, wikilinks, and callout blocks unless the instruction says otherwise.",
+    "Never write the literal text @\u200Bclaude anywhere.",
+  ].join(" ");
+}
+
+/**
+ * True when `edited` contains actionable mentions that `base` didn't — an
+ * edit must never be able to mint a NEW trigger (self-mention loop). The
+ * edited text is not defanged like replies are, so this is checked before
+ * application.
+ */
+export function addsNewMentions(base, edited) {
+  const basePrompts = new Set(findUnansweredMentions(base, 0).map((m) => m.prompt));
+  return findUnansweredMentions(edited, 0).some((m) => !basePrompts.has(m.prompt));
+}
+
+/**
+ * Bounds [start, end) of the mention line PLUS our claim block (located by
+ * nonce), including the trailing newline — removing this span from the live
+ * text leaves exactly what the edit base looked like plus concurrent human
+ * edits. Merging against that REDUCED text is what keeps fuzzy patches from
+ * being displaced onto identical twin lines near the mention (review
+ * demonstrated a checkmark landing on the wrong twin).
+ */
+export function locateMentionUnit(text, prompt, nonce) {
+  const lines = text.split("\n");
+  let offset = 0;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].startsWith(REPLY_HEADER) && lines[i].includes(nonce)) {
+      let m = i - 1;
+      if ((lines[m] ?? "").trim() === "" && m > 0) m--;
+      if (lines[m] !== prompt) return null;
+      const count = blockExtent(lines, i);
+      if (count === -1) return null;
+      let start = 0;
+      for (let j = 0; j < m; j++) start += lines[j].length + 1;
+      let end = offset;
+      for (let j = 0; j < count; j++) end += lines[i + j].length + 1;
+      end = Math.min(end - 1, text.length);
+      if (text[end] === "\n") end++;
+      // Mention-at-EOF nit: stripLine also eats the PRECEDING newline where
+      // this span keeps it — a 1-char base-vs-reduced skew that fuzzy
+      // matching absorbs (verified in review round 2).
+      return { start, end, unit: text.slice(start, end) };
+    }
+    offset += lines[i].length + 1;
+  }
+  return null;
 }
