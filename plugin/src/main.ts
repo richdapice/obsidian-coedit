@@ -5,7 +5,16 @@ import { addComment, CommentModal } from "./comments";
 import { EditorBindingManager } from "./editor-binding";
 import { InviteModal, JoinFolderModal, ShareFolderModal } from "./modals";
 import { isLocalHost, roomName } from "./net";
-import { base64UrlEncode, hmacHex, isInviteToken, isReadOnlyToken, isUnder } from "./paths";
+import {
+  base64UrlEncode,
+  decodeJoinCode,
+  encodeJoinCode,
+  hmacHex,
+  isInviteToken,
+  isReadOnlyToken,
+  isUnder,
+  type JoinCode,
+} from "./paths";
 import { PerfLogModal } from "./perf";
 import { FollowManager, jumpToPeer, PeerSuggestModal, PresenceManager } from "./presence";
 import { showVersionHistory } from "./version-history";
@@ -61,10 +70,23 @@ export default class CoeditPlugin extends Plugin {
       id: "join-folder",
       name: "Join shared folder…",
       callback: () => {
-        new JoinFolderModal(this.app, (folderId, localPath) =>
-          void this.joinFolder(folderId, localPath),
-        ).open();
+        new JoinFolderModal(this.app, (join, localPath) => {
+          void ("host" in join ? this.joinWithCode(join, localPath) : this.joinFolder(join.folderId, localPath));
+        }).open();
       },
+    });
+    // One-tap joining: obsidian://coedit-join?c=<join code> opens the join
+    // dialog with everything prefilled — the receiver only confirms where
+    // the folder lives.
+    this.registerObsidianProtocolHandler("coedit-join", (params) => {
+      const code = typeof params.c === "string" ? params.c : "";
+      new JoinFolderModal(
+        this.app,
+        (join, localPath) => {
+          void ("host" in join ? this.joinWithCode(join, localPath) : this.joinFolder(join.folderId, localPath));
+        },
+        code,
+      ).open();
     });
     this.addCommand({
       id: "version-history",
@@ -97,9 +119,17 @@ export default class CoeditPlugin extends Plugin {
               await hmacHex(this.settings.token, `invite:${nameB64}:${expiry}:${scope}`)
             ).slice(0, 32);
             const token = `${nameB64}.${expiry}.${scope}.${sig}`;
-            await navigator.clipboard.writeText(token);
+            // Wrap the invite in a join code so guests get ONE string too —
+            // but only for a folder on OUR server: the invite is minted with
+            // the vault-global secret and is worthless on a foreign share.
+            const first = this.settings.sharedFolders.find((c) => !c.host && !c.token);
+            const payload = first ? this.joinCodeFor(first, token) : token;
+            await navigator.clipboard.writeText(payload);
             new Notice(
-              `Coedit: invite for ${name} copied (${scope}, ${days}d). They paste it as their Shared secret.`,
+              first
+                ? `Coedit: join code for ${name} copied (${scope}, ${days}d) — the one string they need.`
+                : `Coedit: invite for ${name} copied (${scope}, ${days}d). They paste it as their Shared secret.`,
+              8000,
             );
           })();
         }).open();
@@ -140,14 +170,17 @@ export default class CoeditPlugin extends Plugin {
             new Notice("Coedit: the active note isn't in a shared folder.");
             return;
           }
-          if (isInviteToken(this.settings.token)) {
+          // Sign against the FOLDER's server and token — a foreign share
+          // publishes on its own server, not this vault's default.
+          const effective = this.effectiveSettings(folder.config);
+          if (isInviteToken(effective.token)) {
             new Notice("Coedit: public links can only be minted with the server's real shared secret.");
             return;
           }
           const room = roomName(folder.config.folderId, meta.guid);
-          const sig = (await hmacHex(this.settings.token, `publish:${room}`)).slice(0, 16);
-          const scheme = isLocalHost(this.settings.serverHost) ? "http" : "https";
-          const url = `${scheme}://${this.settings.serverHost}/p/${base64UrlEncode(room)}.${sig}`;
+          const sig = (await hmacHex(effective.token, `publish:${room}`)).slice(0, 16);
+          const scheme = isLocalHost(effective.serverHost) ? "http" : "https";
+          const url = `${scheme}://${effective.serverHost}/p/${base64UrlEncode(room)}.${sig}`;
           await navigator.clipboard.writeText(url);
           new Notice("Coedit: public link copied. Anyone with the link can read this note.");
         })();
@@ -335,11 +368,24 @@ export default class CoeditPlugin extends Plugin {
     this.refreshStatus();
   }
 
+  /**
+   * The settings a folder actually connects with: per-folder host/token
+   * override the vault-globals, so shares from different people's servers
+   * coexist in one vault.
+   */
+  effectiveSettings(config: SharedFolderConfig): CoeditSettings {
+    return {
+      ...this.settings,
+      serverHost: config.host ?? this.settings.serverHost,
+      token: config.token ?? this.settings.token,
+    };
+  }
+
   private async openFolder(config: SharedFolderConfig): Promise<SharedFolder> {
     const appId = (this.app as unknown as { appId?: string }).appId ?? "vault";
     const folder = new SharedFolder(
       this.app,
-      () => this.settings,
+      () => this.effectiveSettings(config),
       config,
       this.applier,
       {
@@ -395,11 +441,52 @@ export default class CoeditPlugin extends Plugin {
     this.settings.sharedFolders.push(config);
     await this.saveSettings();
     await this.openFolder(config);
-    await navigator.clipboard.writeText(config.folderId);
-    new Notice(`Coedit: shared "${folderPath}" — folder ID copied to clipboard.`);
+    await navigator.clipboard.writeText(this.joinCodeFor(config));
+    new Notice(
+      `Coedit: shared "${folderPath}" — join code copied. It's the ONLY thing the other person needs.`,
+      8000,
+    );
   }
 
-  private async joinFolder(folderId: string, localPath: string): Promise<void> {
+  /** One pasteable string carrying server + token + folder — the whole join.
+   *  Uses the folder's OWN connection (a re-shared foreign folder forwards
+   *  its server, not yours). */
+  joinCodeFor(config: SharedFolderConfig, token?: string): string {
+    const effective = this.effectiveSettings(config);
+    return encodeJoinCode({
+      host: effective.serverHost,
+      token: token ?? effective.token,
+      folderId: config.folderId,
+      name: config.localPath.split("/").pop() ?? config.localPath,
+    });
+  }
+
+  /**
+   * Apply a join code. Fresh device → the code configures the vault-global
+   * server + token. Code for a different server or credential → the folder
+   * carries its own connection, so shares from different people coexist.
+   */
+  async joinWithCode(code: JoinCode, localPath: string): Promise<void> {
+    if (!this.settings.serverHost || !this.settings.token) {
+      this.settings.serverHost = code.host;
+      this.settings.token = code.token;
+      await this.saveSettings();
+    }
+    const matchesGlobals =
+      code.host.toLowerCase() === this.settings.serverHost.toLowerCase() &&
+      code.token === this.settings.token;
+    await this.joinFolder(
+      code.folderId,
+      localPath,
+      matchesGlobals ? undefined : { host: code.host, token: code.token },
+    );
+  }
+
+  private async joinFolder(
+    folderId: string,
+    localPath: string,
+    connection?: { host: string; token: string },
+  ): Promise<void> {
     localPath = normalizePath(localPath);
     const clash = this.overlapsExisting(localPath);
     if (clash) {
@@ -413,7 +500,7 @@ export default class CoeditPlugin extends Plugin {
     if (!this.app.vault.getFolderByPath(localPath)) {
       await this.app.vault.createFolder(localPath);
     }
-    const config: SharedFolderConfig = { localPath, folderId };
+    const config: SharedFolderConfig = { localPath, folderId, ...connection };
     this.settings.sharedFolders.push(config);
     await this.saveSettings();
     const folder = await this.openFolder(config);

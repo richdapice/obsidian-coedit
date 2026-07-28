@@ -141,3 +141,33 @@ describe("base64UrlEncode", () => {
     expect(base64UrlEncode("abc")).toBe("YWJj");
   });
 });
+
+describe("join codes", () => {
+  it("round-trips host, token, folder id, and name", async () => {
+    const { encodeJoinCode, decodeJoinCode } = await import("../src/paths");
+    const code = encodeJoinCode({
+      host: "coedit-sync.example.workers.dev",
+      token: "secret-or.invite.token.here",
+      folderId: "6266ff15-3255-4104-8a2a-1a4e4b976d2f",
+      name: "Travel — Japan 🇯🇵",
+    });
+    expect(code.startsWith("coedit1.")).toBe(true);
+    const back = decodeJoinCode(code);
+    expect(back).toEqual({
+      host: "coedit-sync.example.workers.dev",
+      token: "secret-or.invite.token.here",
+      folderId: "6266ff15-3255-4104-8a2a-1a4e4b976d2f",
+      name: "Travel — Japan 🇯🇵",
+    });
+  });
+
+  it("rejects garbage, bare folder ids, and tampered payloads", async () => {
+    const { decodeJoinCode } = await import("../src/paths");
+    expect(decodeJoinCode("6266ff15-3255-4104-8a2a-1a4e4b976d2f")).toBeNull();
+    expect(decodeJoinCode("coedit1.not-base64!!!")).toBeNull();
+    expect(decodeJoinCode("coedit1." + btoa(JSON.stringify({ h: "x" })))).toBeNull();
+    expect(
+      decodeJoinCode("coedit1." + btoa(JSON.stringify({ h: "h", t: "t", f: "not hex!" }))),
+    ).toBeNull();
+  });
+});

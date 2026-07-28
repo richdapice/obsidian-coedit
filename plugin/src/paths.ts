@@ -138,3 +138,54 @@ export function classifyMapDelta(
   }
   return { added, removed, updated, renamed };
 }
+
+export function base64UrlDecode(s: string): string {
+  const b64 = s.replace(/-/g, "+").replace(/_/g, "/");
+  const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+
+/**
+ * A join code packs everything a device needs to join a shared folder —
+ * server, auth token, folder id, and a suggested folder name — into one
+ * pasteable string. Sharing used to require sending all three parts
+ * separately, and every support conversation started with which part went
+ * in which box.
+ */
+export interface JoinCode {
+  host: string;
+  token: string;
+  folderId: string;
+  name: string;
+}
+
+const JOIN_CODE_PREFIX = "coedit1.";
+
+export function encodeJoinCode(code: JoinCode): string {
+  return (
+    JOIN_CODE_PREFIX +
+    base64UrlEncode(JSON.stringify({ h: code.host, t: code.token, f: code.folderId, n: code.name }))
+  );
+}
+
+export function isJoinCode(s: string): boolean {
+  return s.startsWith(JOIN_CODE_PREFIX);
+}
+
+export function decodeJoinCode(s: string): JoinCode | null {
+  if (!isJoinCode(s)) return null;
+  try {
+    const raw = JSON.parse(base64UrlDecode(s.slice(JOIN_CODE_PREFIX.length))) as Record<
+      string,
+      unknown
+    >;
+    const { h, t, f, n } = raw;
+    if (typeof h !== "string" || typeof t !== "string" || typeof f !== "string" || !h || !t || !f) {
+      return null;
+    }
+    if (!/^[0-9a-fA-F-]{16,64}$/.test(f)) return null;
+    return { host: h, token: t, folderId: f, name: typeof n === "string" ? n : "" };
+  } catch {
+    return null;
+  }
+}
