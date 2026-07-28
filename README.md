@@ -71,7 +71,7 @@ answers in a quoted callout beneath it. Two interchangeable brains:
 - **Daemon** (`peer/`): runs on a Mac via launchd, answers through the local
   `claude` CLI (subscription-billed). Copy `config.example.json` to
   `config.json` (host, shared secret, folder ids, absolute `claudeBin`),
-  `npm install`, then load the plist (edit PEER_DIR placeholders first).
+  `npm install`, then copy coedit-claude.example.plist into ~/Library/LaunchAgents (edit the PEER_DIR placeholders and label first). Set "context" in config.json so Claude knows whose folder it's in.
 - **Durable Object fallback** (server): dormant unless the
   `ANTHROPIC_API_KEY` worker secret is set (`wrangler secret put
   ANTHROPIC_API_KEY`, metered billing). It answers only when the daemon's

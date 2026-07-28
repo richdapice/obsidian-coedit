@@ -380,3 +380,14 @@ describe("edit guard strength", () => {
     expect(addsNewMentions(base, swapped)).toBe(true);
   });
 });
+
+describe("deployment context", () => {
+  it("prompts use the injected context and a generic default", async () => {
+    const { systemPrompt, editSystemPrompt, DEFAULT_CONTEXT } = await import("../../shared/mentions.mjs");
+    expect(systemPrompt(null)).toContain(DEFAULT_CONTEXT);
+    expect(systemPrompt(null, "the robotics club wiki")).toContain("the robotics club wiki");
+    expect(editSystemPrompt("N.md", "fix", "the robotics club wiki")).toContain("the robotics club wiki");
+    expect(systemPrompt(null)).not.toMatch(/Japan/);
+    expect(editSystemPrompt("N.md", "fix")).not.toMatch(/Japan/);
+  });
+});

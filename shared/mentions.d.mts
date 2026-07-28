@@ -12,7 +12,8 @@ export interface Mention {
 }
 export declare function findUnansweredMentions(text: string, now?: number): Mention[];
 export declare function formatReply(answer: string): string;
-export declare function systemPrompt(notePath: string | null): string;
+export declare const DEFAULT_CONTEXT: string;
+export declare function systemPrompt(notePath: string | null, context?: string): string;
 export interface ReplyHandle {
   nonce: string;
   ownsClaim(): boolean;
@@ -28,7 +29,7 @@ export declare function claimReply(
 export declare function contentHash(str: string): string;
 export declare function parseEditInstruction(promptLine: string): string | null;
 export declare function stripLine(text: string, line: string): string;
-export declare function editSystemPrompt(notePath: string, instruction: string): string;
+export declare function editSystemPrompt(notePath: string, instruction: string, context?: string): string;
 export declare function addsNewMentions(base: string, edited: string): boolean;
 export declare function locateMentionUnit(
   text: string,

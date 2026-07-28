@@ -169,7 +169,7 @@ export class YDocServer extends YServer<Env> {
         model: PEER_MODEL,
         max_tokens: 2000,
         thinking: { type: "adaptive" },
-        system: systemPrompt(null),
+        system: systemPrompt(null, this.env.PEER_CONTEXT),
         messages: [{ role: "user", content: noteText }],
       });
       let answer = "";

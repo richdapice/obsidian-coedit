@@ -75,7 +75,7 @@ function askClaude(notePath, noteText) {
   }
   // Prompt over STDIN, not argv: giant notes would blow the argv limit, and
   // argv leaks note content into `ps` output.
-  const prompt = `${systemPrompt(notePath)}\n\n--- NOTE CONTENT ---\n${noteText}`;
+  const prompt = `${systemPrompt(notePath, CONFIG.context)}\n\n--- NOTE CONTENT ---\n${noteText}`;
   return new Promise((resolve, reject) => {
     const child = spawn(CONFIG.claudeBin ?? "claude", ["-p"], {
       stdio: ["pipe", "pipe", "pipe"],
@@ -134,7 +134,7 @@ function editClaude(notePath, baseText, instruction) {
         rmSync(dir, { recursive: true, force: true });
       }
     });
-    child.stdin.write(editSystemPrompt(notePath, instruction));
+    child.stdin.write(editSystemPrompt(notePath, instruction, CONFIG.context));
     child.stdin.end();
   });
 }
