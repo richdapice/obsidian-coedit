@@ -1,4 +1,5 @@
 import { AbstractInputSuggest, type App, Modal, Setting, TFolder } from "obsidian";
+import { decodeJoinCode, isJoinCode, type JoinCode } from "./paths";
 
 /** Autocomplete over existing vault folders, attached to a plain text input. */
 class FolderSuggest extends AbstractInputSuggest<TFolder> {
@@ -119,54 +120,105 @@ export class InviteModal extends Modal {
 }
 
 export class JoinFolderModal extends Modal {
-  private folderId = "";
+  private pasted = "";
   private localPath = "";
+  private pathTouched = false;
 
   constructor(
     app: App,
-    private onSubmit: (folderId: string, localPath: string) => void,
+    private onSubmit: (join: JoinCode | { folderId: string }, localPath: string) => void,
+    private prefill = "",
   ) {
     super(app);
   }
 
   onOpen(): void {
     this.setTitle("Join a shared folder");
+    this.pasted = this.prefill;
     let errorEl: HTMLElement | null = null;
+    let pathInput: HTMLInputElement | null = null;
+    let hostEl: HTMLElement | null = null;
+    const suggestName = () => {
+      const code = decodeJoinCode(this.pasted);
+      // Show WHERE this code connects: a code from a chat (or a drive-by
+      // obsidian:// link) carries credentials for an arbitrary server, and
+      // the user should see which one before joining.
+      hostEl?.remove();
+      hostEl = null;
+      if (code) {
+        hostEl = this.contentEl.createEl("p", {
+          text: `Connects to ${code.host}`,
+          cls: "coedit-modal-host",
+        });
+      }
+      // A join code carries the sharer's folder name — offer it as the
+      // local path until the user types their own.
+      if (code?.name && !this.pathTouched && pathInput) {
+        this.localPath = code.name;
+        pathInput.value = code.name;
+      }
+    };
     new Setting(this.contentEl)
-      .setName("Folder ID")
-      .setDesc("The ID copied by “Share folder…” (looks like 8-4-4-4-12 hex). NOT an invite token — that goes in Settings → Shared secret.")
-      .addText((text) => text.onChange((v) => (this.folderId = v.trim())));
+      .setName("Join code")
+      .setDesc("Paste the code from “Share folder…” (starts with coedit1.) — it carries the server, access, and folder all in one. A bare folder ID from an older share works too.")
+      .addText((text) => {
+        text.setValue(this.prefill);
+        text.onChange((v) => {
+          this.pasted = v.trim();
+          suggestName();
+        });
+      });
     new Setting(this.contentEl)
       .setName("Local folder")
       .setDesc("Pick an existing folder, or type a new path to create it.")
       .addText((text) => {
-        text.onChange((v) => (this.localPath = v.trim()));
-        new FolderSuggest(this.app, text.inputEl, (path) => (this.localPath = path));
+        pathInput = text.inputEl;
+        text.onChange((v) => {
+          this.localPath = v.trim();
+          this.pathTouched = v.trim().length > 0;
+        });
+        new FolderSuggest(this.app, text.inputEl, (path) => {
+          this.localPath = path;
+          this.pathTouched = true;
+        });
       });
+    suggestName();
     new Setting(this.contentEl).addButton((btn) =>
       btn
         .setButtonText("Join")
         .setCta()
         .onClick(() => {
-          if (!this.folderId || !this.localPath) return;
+          if (!this.pasted || !this.localPath) return;
           errorEl?.remove();
           const showError = (msg: string) => {
             errorEl = this.contentEl.createEl("p", { text: msg, cls: "coedit-modal-error" });
           };
-          // Joining a wrong ID "works" — it creates an empty folder — so the
-          // common paste mistakes must be caught here, loudly.
-          if (this.folderId.split(".").length === 4) {
+          const path = this.localPath.replace(/\/+$/, "");
+          if (isJoinCode(this.pasted)) {
+            const code = decodeJoinCode(this.pasted);
+            if (!code) {
+              showError("That join code didn't decode — it may have been truncated in transit. Ask the sharer to copy it again.");
+              return;
+            }
+            this.close();
+            this.onSubmit(code, path);
+            return;
+          }
+          // Legacy path: a bare folder ID. Joining a wrong ID "works" — it
+          // creates an empty folder — so the common paste mistakes must be
+          // caught here, loudly.
+          if (this.pasted.split(".").length === 4) {
             showError(
-              "That's an invite token, not a folder ID. Invite tokens go in Settings → Coedit → Shared secret; ask the sharer for the folder ID from “Share folder…” (or its “Copy ID” button in settings).",
+              "That's an invite token, not a join code. Ask the sharer for a join code (coedit1.…) — it includes everything — or paste the token in Settings → Coedit → Shared secret and join with the folder ID.",
             );
             return;
           }
-          if (!/^[0-9a-fA-F-]{16,64}$/.test(this.folderId)) {
-            showError("That doesn't look like a folder ID (expected hex characters and dashes, like 8-4-4-4-12).");
+          if (!/^[0-9a-fA-F-]{16,64}$/.test(this.pasted)) {
+            showError("That doesn't look like a join code (coedit1.…) or a folder ID (hex with dashes).");
             return;
           }
           this.close();
-          this.onSubmit(this.folderId, this.localPath.replace(/\/+$/, ""));
+          this.onSubmit({ folderId: this.pasted }, path);
         }),
     );
   }

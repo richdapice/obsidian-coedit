@@ -36,9 +36,10 @@ export async function showVersionHistory(
   meta: FileMeta,
 ): Promise<void> {
   const room = roomName(folder.config.folderId, meta.guid);
+  const settings = plugin.effectiveSettings(folder.config);
   let checkpoints: CheckpointInfo[];
   try {
-    checkpoints = await listCheckpoints(plugin.settings, room);
+    checkpoints = await listCheckpoints(settings, room);
   } catch (err) {
     new Notice(`Coedit: could not load history — ${err instanceof Error ? err.message : err}`);
     return;
@@ -51,8 +52,8 @@ export async function showVersionHistory(
     void (async () => {
       try {
         // Preserve the current state as its own checkpoint before rewinding.
-        await createCheckpoint(plugin.settings, room);
-        const update = await pullCheckpoint(plugin.settings, room, ckpt.ts);
+        await createCheckpoint(settings, room);
+        const update = await pullCheckpoint(settings, room, ckpt.ts);
         const doc = new Y.Doc();
         Y.applyUpdate(doc, update);
         const text = doc.getText("contents").toString();

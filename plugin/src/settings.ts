@@ -1,4 +1,4 @@
-import { type App, PluginSettingTab, Setting } from "obsidian";
+import { type App, Notice, PluginSettingTab, Setting } from "obsidian";
 import type CoeditPlugin from "./main";
 
 export interface SharedFolderConfig {
@@ -6,6 +6,13 @@ export interface SharedFolderConfig {
   localPath: string;
   /** UUID shared by everyone syncing this folder. */
   folderId: string;
+  /**
+   * Per-folder connection override so one vault can hold shares from
+   * DIFFERENT people's servers. Absent → the vault-global serverHost/token
+   * (existing folders keep working untouched).
+   */
+  host?: string;
+  token?: string;
 }
 
 export interface CoeditSettings {
@@ -86,9 +93,19 @@ export class CoeditSettingTab extends PluginSettingTab {
     for (const folder of this.plugin.settings.sharedFolders) {
       new Setting(containerEl)
         .setName(folder.localPath)
-        .setDesc(`ID ${folder.folderId}`)
+        .setDesc(folder.host ? `ID ${folder.folderId} · on ${folder.host}` : `ID ${folder.folderId}`)
         .addButton((btn) =>
-          btn.setButtonText("Copy ID").onClick(() => {
+          btn
+            .setButtonText("Copy join code")
+            .setTooltip("One string with server, access, and folder — all a new device needs. Carries THIS device's token.")
+            .setCta()
+            .onClick(() => {
+              void navigator.clipboard.writeText(this.plugin.joinCodeFor(folder));
+              new Notice("Coedit: join code copied.");
+            }),
+        )
+        .addButton((btn) =>
+          btn.setButtonText("Copy ID").setTooltip("Just the folder ID (legacy)").onClick(() => {
             void navigator.clipboard.writeText(folder.folderId);
           }),
         )
