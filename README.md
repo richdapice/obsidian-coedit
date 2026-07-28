@@ -1,23 +1,22 @@
 # Coedit
 
-Real-time collaborative editing for Obsidian, in the spirit of
-[Relay](https://relay.md): share a vault folder, and its markdown files sync
-live between vaults — remote cursors included — through a self-hosted
-Cloudflare Durable Objects backend. Yjs CRDTs do the merging.
+Real-time collaborative editing for Obsidian: share a vault folder, and its
+markdown files sync live between vaults, remote cursors included, through a
+self-hosted Cloudflare Durable Objects backend. Yjs CRDTs do the merging.
 
 ## Layout
 
-- `server/` — Cloudflare Worker. One Durable Object per Y.Doc
+- `server/`: the Cloudflare Worker. One Durable Object per Y.Doc
   (`y-partyserver` with WebSocket hibernation), shared-secret auth checked
   before upgrade, chunked snapshot persistence in DO storage, and an HTTP
   `GET/POST …/as-update` endpoint so background sync never holds sockets.
-- `plugin/` — the Obsidian plugin. A folder-level index Y.Doc maps
+- `plugin/`: the Obsidian plugin. A folder-level index Y.Doc maps
   relative path → `{guid, hash, mtime}`; each file is its own Y.Doc
   (`getText("contents")`) identified by guid, so renames move map keys only.
   Open editors bind via `y-codemirror.next` over WebSocket; closed files
   reconcile over HTTP. Per-doc IndexedDB persistence + diff-match-patch
   folding make offline edits merge instead of clobber.
-- `dev/` — `setup.sh` builds two throwaway vaults (alice/bob) wired to
+- `dev/`: `setup.sh` builds two throwaway vaults (alice/bob) wired to
   `localhost:8787` with a pre-shared folder `Shared/`.
 
 ## Quick start (local)
@@ -83,4 +82,4 @@ Protocol notes: replies are `> [!quote]` callouts carrying an ownership
 nonce; caps are 50/day (daemon) and 10/day per note (fallback); read-only
 invitees can't trigger answers (their connections can't write). Scripted
 notes that rewrite themselves (ticket watchers) re-ask on every rewrite if
-you put a mention in one — don't.
+you put a mention in one, so don't.
