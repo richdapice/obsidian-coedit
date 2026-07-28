@@ -230,3 +230,153 @@ describe("markerless-block fail-safe", () => {
     expect(after).toContain("\nrest\n");
   });
 });
+
+import { editSystemPrompt, parseEditInstruction, stripLine } from "../../shared/mentions.mjs";
+import DiffMatchPatch from "diff-match-patch";
+import { createTextEdit, hasLoneSurrogate as tHasLone } from "../../shared/text-edit.mjs";
+const { mergeEditedText, setTextTo } = createTextEdit(DiffMatchPatch);
+
+describe("edit mode protocol", () => {
+  it("parses explicit edit instructions only", () => {
+    expect(parseEditInstruction("@claude edit: fix the typos")).toBe("fix the typos");
+    expect(parseEditInstruction("- @claude EDIT:  dedupe this list ")).toBe("dedupe this list");
+    expect(parseEditInstruction("@claude what should we edit?")).toBeNull();
+    expect(parseEditInstruction("@claude edit:")).toBeNull();
+  });
+
+  it("stripLine removes exactly the mention line", () => {
+    const text = "a\n@claude edit: go\nb\n";
+    expect(stripLine(text, "@claude edit: go")).toBe("a\nb\n");
+    expect(stripLine(text, "not there")).toBe(text);
+  });
+
+  it("editSystemPrompt never contains an unquoted trigger", () => {
+    const p = editSystemPrompt("Trip.md", "shorten it");
+    expect(findUnansweredMentions(p)).toHaveLength(0);
+  });
+});
+
+describe("text-edit application", () => {
+  it("setTextTo makes the doc equal the target exactly (emoji intact)", () => {
+    const doc = new Y.Doc();
+    const ytext = doc.getText("contents");
+    ytext.insert(0, "# 🍣 List\n- [ ] a\n- [ ] b\n");
+    setTextTo(doc, ytext, "# 🍜 List\n- [x] a\n- [ ] c\n");
+    expect(ytext.toString()).toBe("# 🍜 List\n- [x] a\n- [ ] c\n");
+    expect(tHasLone(ytext.toString())).toBe(false);
+  });
+
+  it("mergeEditedText keeps concurrent human edits", () => {
+    const base = "# Packing\n- socks\n- shirts\n- chargers\n";
+    const edited = "# Packing\n- socks (7 pairs)\n- shirts\n- chargers\n";
+    const current = "# Packing\n- socks\n- shirts\n- chargers\n- HUMAN ADDED THIS\n";
+    const merged = mergeEditedText(base, edited, current);
+    expect(merged).toContain("- socks (7 pairs)");
+    expect(merged).toContain("- HUMAN ADDED THIS");
+  });
+
+  it("mergeEditedText is all-or-nothing on unplaceable patches", () => {
+    const base = "the quick brown fox\njumps over\nthe lazy dog\n";
+    const edited = "the quick brown fox\njumps over EDIT\nthe lazy dog\n";
+    const current = "completely unrelated content now\n".repeat(5);
+    expect(mergeEditedText(base, edited, current)).toBeNull();
+  });
+
+  it("edit application around a live mention + claim block", () => {
+    // The live doc holds the mention and our claim; patches from the
+    // stripped base must still land around them.
+    const doc = new Y.Doc();
+    const ytext = doc.getText("contents");
+    ytext.insert(0, "# Note\n\n@claude edit: capitalize the title\n\nbody line\n");
+    const text0 = ytext.toString();
+    const reply = claimReply(doc, ytext, "@claude edit: capitalize the title", "t-edit");
+    const base = stripLine(text0, "@claude edit: capitalize the title");
+    const edited = base.replace("# Note", "# NOTE");
+    const merged = mergeEditedText(base, edited, ytext.toString());
+    expect(merged).not.toBeNull();
+    setTextTo(doc, ytext, merged!);
+    reply!.update("✏️ Done — capitalized the title");
+    const text = ytext.toString();
+    expect(text).toContain("# NOTE");
+    expect(text).toContain("@claude edit: capitalize the title");
+    expect(text).toContain("> ✏️ Done — capitalized the title");
+    expect(text).toContain("body line");
+    expect(findUnansweredMentions(text)).toHaveLength(0);
+  });
+});
+
+describe("edit self-trigger guard", () => {
+  it("flags edits that mint new mentions and passes edits that don't", async () => {
+    const { addsNewMentions } = await import("../../shared/mentions.mjs");
+    const base = "# N\n\n@claude keep me\n\nbody\n";
+    expect(addsNewMentions(base, base.replace("body", "body\n@claude new trigger"))).toBe(true);
+    expect(addsNewMentions(base, base.replace("body", "changed body"))).toBe(false);
+  });
+});
+
+import { locateMentionUnit } from "../../shared/mentions.mjs";
+const { mergeAroundUnit } = createTextEdit(DiffMatchPatch);
+
+describe("edit misplacement regression (review-demonstrated)", () => {
+  it("checks off the twin BELOW the mention, not the identical twin above", () => {
+    const doc = new Y.Doc();
+    const ytext = doc.getText("contents");
+    ytext.insert(
+      0,
+      "# Tickets\n- [ ] buy tickets\n@claude edit: check off the item below\n- [ ] buy tickets\nrest\n",
+    );
+    const text0 = ytext.toString();
+    const prompt = "@claude edit: check off the item below";
+    const reply = claimReply(doc, ytext, prompt, "t-twin");
+    const base = stripLine(text0, prompt);
+    // Claude checks the SECOND twin (the one below the mention in base order).
+    const edited = base.replace(
+      "- [ ] buy tickets\n- [ ] buy tickets",
+      "- [ ] buy tickets\n- [x] buy tickets",
+    );
+    const live = ytext.toString();
+    const unit = locateMentionUnit(live, prompt, reply!.nonce);
+    expect(unit).not.toBeNull();
+    const final = mergeAroundUnit(base, edited, live, unit!);
+    expect(final).not.toBeNull();
+    setTextTo(doc, ytext, final!);
+    reply!.update("✏️ Done");
+    const text = ytext.toString();
+    const above = text.indexOf("- [ ] buy tickets");
+    const mentionAt = text.indexOf(prompt);
+    const below = text.indexOf("- [x] buy tickets");
+    // Unchecked twin stays ABOVE the mention; checked twin sits BELOW it.
+    expect(above).toBeGreaterThan(-1);
+    expect(above).toBeLessThan(mentionAt);
+    expect(below).toBeGreaterThan(mentionAt);
+    expect(text).toContain("rest");
+  });
+
+  it("keeps concurrent human edits while splicing the unit back", () => {
+    const doc = new Y.Doc();
+    const ytext = doc.getText("contents");
+    ytext.insert(0, "alpha\n@claude edit: tweak beta\nbeta\ngamma\n");
+    const prompt = "@claude edit: tweak beta";
+    const text0 = ytext.toString();
+    const reply = claimReply(doc, ytext, prompt, "t-cc");
+    const base = stripLine(text0, prompt);
+    const edited = base.replace("beta", "beta (tweaked)");
+    // Human edits far away while Claude works:
+    ytext.insert(ytext.toString().indexOf("gamma"), "HUMAN\n");
+    const live = ytext.toString();
+    const unit = locateMentionUnit(live, prompt, reply!.nonce);
+    const final = mergeAroundUnit(base, edited, live, unit!);
+    expect(final).toContain("beta (tweaked)");
+    expect(final).toContain("HUMAN");
+    expect(final).toContain(prompt);
+  });
+});
+
+describe("edit guard strength", () => {
+  it("addsNewMentions catches swap-one-for-another", async () => {
+    const { addsNewMentions } = await import("../../shared/mentions.mjs");
+    const base = "@claude old question\nbody\n";
+    const swapped = "@claude brand new question\nbody\n";
+    expect(addsNewMentions(base, swapped)).toBe(true);
+  });
+});

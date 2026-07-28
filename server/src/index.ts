@@ -13,6 +13,7 @@ import {
   MAX_REPLY_CHARS,
   claimReply,
   findUnansweredMentions,
+  parseEditInstruction,
   systemPrompt,
 } from "../../shared/mentions.mjs";
 
@@ -135,6 +136,15 @@ export class YDocServer extends YServer<Env> {
     // Let a racing daemon claim propagate; keep only the first block.
     await new Promise((r) => setTimeout(r, 2500));
     if (!reply.ownsClaim()) return;
+
+    // Edit mode needs the Mac daemon's sandbox; this fallback brain only
+    // answers. Say so instead of replying with prose to an edit request.
+    if (parseEditInstruction(prompt) !== null) {
+      reply.update(
+        "✏️ Edits need the Mac running Coedit's Claude daemon, and it looks offline right now. I can answer questions meanwhile — re-ask without “edit:”.",
+      );
+      return;
+    }
 
     // Metered call is now certain — count it. Per-doc cap; yesterday's
     // counter is dropped as the day rolls over.

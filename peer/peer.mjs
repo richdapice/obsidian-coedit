@@ -8,18 +8,29 @@
 // Config: peer/config.json — see config.example.json. Run: node peer.mjs
 
 import { spawn } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import WebSocket from "ws";
 import YProvider from "y-partyserver/provider";
 import * as Y from "yjs";
 import {
   DAILY_CAP,
   MAX_REPLY_CHARS,
+  addsNewMentions,
   claimReply,
+  locateMentionUnit,
   contentHash,
+  editSystemPrompt,
   findUnansweredMentions,
+  parseEditInstruction,
+  stripLine,
   systemPrompt,
 } from "../shared/mentions.mjs";
+import DiffMatchPatch from "diff-match-patch";
+import { createTextEdit } from "../shared/text-edit.mjs";
+
+const { mergeAroundUnit, setTextTo } = createTextEdit(DiffMatchPatch);
 
 const CONFIG = JSON.parse(readFileSync(new URL("./config.json", import.meta.url), "utf8"));
 const STATE_URL = new URL("./state.json", import.meta.url);
@@ -90,6 +101,44 @@ function askClaude(notePath, noteText) {
   });
 }
 
+/** Run claude with Read/Edit tools in a scratch dir holding note.md; return
+ *  the edited file. Sandboxed: Claude touches only the scratch copy — the
+ *  live doc is updated by US through the hardened merge path. */
+function editClaude(notePath, baseText, instruction) {
+  if (process.env.COEDIT_FAKE_EDIT_APPEND) {
+    return Promise.resolve(`${baseText.replace(/\n+$/, "\n")}${process.env.COEDIT_FAKE_EDIT_APPEND}\n`);
+  }
+  const dir = mkdtempSync(join(tmpdir(), "coedit-edit-"));
+  writeFileSync(join(dir, "note.md"), baseText);
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      CONFIG.claudeBin ?? "claude",
+      ["-p", "--allowedTools", "Read,Edit,Write", "--permission-mode", "acceptEdits"],
+      { cwd: dir, stdio: ["pipe", "pipe", "pipe"], timeout: CLAUDE_TIMEOUT_MS },
+    );
+    let stderr = "";
+    child.stderr.on("data", (d) => (stderr += d));
+    child.on("error", (err) => {
+      rmSync(dir, { recursive: true, force: true });
+      reject(err);
+    });
+    child.on("close", (code) => {
+      try {
+        if (code !== 0) throw new Error(`claude edit exited ${code}: ${stderr.slice(0, 300)}`);
+        const edited = readFileSync(join(dir, "note.md"), "utf8");
+        if (!edited.trim()) throw new Error("edit produced an empty file");
+        resolve(edited);
+      } catch (err) {
+        reject(err);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+    child.stdin.write(editSystemPrompt(notePath, instruction));
+    child.stdin.end();
+  });
+}
+
 // ---- per-folder session -------------------------------------------------
 class FolderSession {
   constructor(folderId) {
@@ -143,7 +192,7 @@ class FolderSession {
       // Beat this room immediately: a mention typed into a brand-new note
       // must not find a beat-less DO (both brains eligible = claim race).
       void beatRoom(`${this.folderId}:${guid}`);
-      const entry = { doc, provider, path, timer: null, busy: new Set() };
+      const entry = { doc, provider, path, guid, timer: null, busy: new Set() };
       doc.getText("contents").observe(() => {
         if (entry.timer) clearTimeout(entry.timer);
         entry.timer = setTimeout(() => {
@@ -187,6 +236,7 @@ class FolderSession {
   /** Returns true if a claim was made (successful or retracted after). */
   async answer(entry, mention) {
     const ytext = entry.doc.getText("contents");
+    const text0 = ytext.toString();
     const reply = claimReply(entry.doc, ytext, mention.prompt, "mac");
     if (!reply) return false;
     // Let a racing claim from the other brain propagate, then keep only the
@@ -197,6 +247,12 @@ class FolderSession {
       return true;
     }
     bumpCap();
+    const instruction = parseEditInstruction(mention.prompt);
+    if (instruction !== null) {
+      await this.edit(entry, mention, reply, text0, instruction);
+      this.advertise(entry);
+      return true;
+    }
     log(`answering mention in ${entry.path}: ${mention.prompt.slice(0, 80)}`);
     let answer;
     try {
@@ -213,19 +269,95 @@ class FolderSession {
       await new Promise((r) => setTimeout(r, TYPE_INTERVAL_MS));
     }
     reply.update(answer);
-    // Advertise the new content in the index: closed notes on other devices
-    // only pull when the map hash moves — without this, replies to notes
-    // nobody has open stay invisible until the note is next opened.
-    const meta = this.files.get(entry.path);
-    if (meta) {
-      this.files.set(entry.path, {
-        ...meta,
-        hash: contentHash(ytext.toString()),
-        mtime: Date.now(),
-      });
-    }
+    this.advertise(entry);
     log(`answered in ${entry.path} (${answer.length} chars)`);
     return true;
+  }
+
+  /** Closed notes on other devices only pull when the index hash moves. */
+  advertise(entry) {
+    const meta = this.files.get(entry.path);
+    if (!meta) return;
+    this.files.set(entry.path, {
+      ...meta,
+      hash: contentHash(entry.doc.getText("contents").toString()),
+      mtime: Date.now(),
+    });
+  }
+
+  /**
+   * "@claude edit:" — Claude edits a scratch copy with real tools; the delta
+   * is fuzzy-merged into the live doc (concurrent human edits win; on any
+   * conflict nothing is forced). A checkpoint precedes every applied edit so
+   * undo is one version-history click away.
+   */
+  async edit(entry, mention, reply, text0, instruction) {
+    log(`editing ${entry.path}: ${instruction.slice(0, 80)}`);
+    const ytext = entry.doc.getText("contents");
+    // Claude works on the note WITHOUT the mention line — the instruction
+    // travels in the prompt, and patches stay clear of the mention region.
+    const base = stripLine(text0, mention.prompt);
+    let edited;
+    try {
+      edited = await editClaude(entry.path, base, instruction);
+    } catch (err) {
+      log(`edit failed:`, err.message);
+      reply.update(`⚠️ Couldn't make the edit: ${err.message.split("\n")[0]}`);
+      return;
+    }
+    if (edited === base) {
+      reply.update("✏️ Looked at it — nothing needed changing.");
+      return;
+    }
+    // Growth-relative balloon guard, not an absolute cap: big itineraries
+    // must stay editable.
+    if (edited.length > Math.max(base.length * 2, base.length + MAX_REPLY_CHARS)) {
+      reply.update("⚠️ The edit ballooned the note suspiciously — refusing to apply it.");
+      return;
+    }
+    if (addsNewMentions(base, edited)) {
+      reply.update("⚠️ The edit tried to add a new @\u200Bclaude mention — refusing to apply it (that way lies an infinite loop).");
+      return;
+    }
+    // Checkpoint BEFORE applying. The confirmation SELLS undo-via-history;
+    // without a fresh checkpoint that promise could roll back hours of
+    // human edits, so a failed checkpoint refuses the edit.
+    try {
+      const res = await fetch(
+        `${scheme}://${CONFIG.host}/parties/y-doc-server/${encodeURIComponent(`${this.folderId}:${entry.guid}`)}/checkpoints?token=${CONFIG.token}`,
+        { method: "POST" },
+      );
+      if (!res.ok) throw new Error(`checkpoint returned ${res.status}`);
+    } catch (err) {
+      log("pre-edit checkpoint failed; refusing edit:", err.message);
+      reply.update("⚠️ Couldn't save an undo checkpoint, so I didn't touch the note. Try again in a moment.");
+      return;
+    }
+    // Merge against the live text with the mention+claim unit REMOVED, then
+    // splice it back — fuzzy patches otherwise get displaced onto identical
+    // twin lines near the mention (review demonstrated a checkmark landing
+    // on the wrong item). No awaits from here to setTextTo.
+    const live = ytext.toString();
+    const unitBounds = locateMentionUnit(live, mention.prompt, reply.nonce);
+    // ownsClaim() FIRST and unconditionally: it retracts our block when the
+    // mention was edited away, so a canceled edit never leaves a dangling
+    // "…" block (short-circuiting past it did — review round 2).
+    const owns = reply.ownsClaim();
+    if (!unitBounds || !owns) {
+      // Mention or claim removed mid-run — the natural cancel gesture.
+      log(`edit canceled in ${entry.path} (mention/claim removed)`);
+      return;
+    }
+    const final = mergeAroundUnit(base, edited, live, unitBounds);
+    if (final === null) {
+      reply.update(
+        "⚠️ The note changed while I was editing and the changes couldn't be merged safely — nothing was applied. Try again.",
+      );
+      return;
+    }
+    setTextTo(entry.doc, ytext, final);
+    reply.update(`✏️ Done — ${instruction}\nUndo anytime: “Version history for current note”.`);
+    log(`edited ${entry.path} (${base.length} -> ${edited.length} chars)`);
   }
 }
 
