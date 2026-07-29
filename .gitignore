@@ -10,3 +10,4 @@ plugin/main.js
 peer/config.json
 peer/state.json
 .anthropic-key
+server/scripts/restore-*.mjs
