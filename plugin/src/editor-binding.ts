@@ -245,7 +245,10 @@ export class EditorBindingManager {
             yCollab(entry.ytext, null),
             Prec.high(keymap.of(yUndoManagerKeymap)),
             commentsExtension(entry),
-            edgeIndicators(entry, entry.provider.awareness),
+            edgeIndicators(entry, entry.provider.awareness, {
+              awareness: folder.provider.awareness,
+              relPath: folder.relPath(path),
+            }),
             remoteCursors(entry, entry.provider.awareness),
           ]),
         });
