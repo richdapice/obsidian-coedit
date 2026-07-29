@@ -99,6 +99,27 @@
   margin-left: 0;
 }
 
+/* Phones: the editor extends under the OS status bar / Dynamic Island, so
+   clear the safe area, and give chips a finger-sized tap target. Obsidian
+   sets --safe-area-inset-* on mobile; env() is the fallback. */
+.is-mobile .coedit-edge-top {
+  top: calc(12px + max(var(--safe-area-inset-top, 0px), env(safe-area-inset-top, 0px)));
+}
+
+.is-mobile .coedit-edge-bottom {
+  bottom: calc(12px + max(var(--safe-area-inset-bottom, 0px), env(safe-area-inset-bottom, 0px)));
+}
+
+.is-mobile .coedit-edge-chip {
+  padding: 8px 14px;
+  border-radius: 18px;
+  font-size: var(--font-ui-small);
+}
+
+.is-mobile .coedit-edge-indicators {
+  gap: 8px;
+}
+
 .coedit-remote-selections,
 .coedit-remote-carets {
   pointer-events: none;
