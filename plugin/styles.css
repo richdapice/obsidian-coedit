@@ -90,6 +90,11 @@
   font-size: 0.7em;
 }
 
+/* Same-page peer whose position is unknown — informational, not clickable. */
+.coedit-edge-chip.coedit-edge-static {
+  cursor: default;
+}
+
 .coedit-edge-chip .coedit-presence-dot {
   margin-left: 0;
 }
