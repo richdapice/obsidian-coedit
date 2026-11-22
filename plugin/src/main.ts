@@ -10,10 +10,13 @@ import {
   decodeJoinCode,
   encodeJoinCode,
   hmacHex,
+  inviteExpiry,
+  isExpiredInvite,
   isInviteToken,
   isReadOnlyToken,
   isUnder,
   type JoinCode,
+  planCredentialRefresh,
 } from "./paths";
 import { PerfLogModal } from "./perf";
 import { FollowManager, jumpToPeer, PeerSuggestModal, PresenceManager } from "./presence";
@@ -364,8 +367,27 @@ export default class CoeditPlugin extends Plugin {
         10000,
       );
     }
+    this.warnExpiringInvites();
     await Promise.all(this.settings.sharedFolders.map((config) => this.openFolder(config)));
     this.refreshStatus();
+  }
+
+  /** Heads-up in an invite's last week, so renewal happens before the folder goes dark. */
+  private warnExpiringInvites(): void {
+    const now = Date.now();
+    const tokens = new Set(
+      this.settings.sharedFolders.map((config) => this.effectiveSettings(config).token),
+    );
+    for (const token of tokens) {
+      const expiry = inviteExpiry(token);
+      if (expiry === null || expiry < now || expiry - now > 7 * 86_400_000) continue;
+      const days = Math.max(1, Math.ceil((expiry - now) / 86_400_000));
+      new Notice(
+        `Coedit: your invite expires in ${days} day${days === 1 ? "" : "s"} (${new Date(expiry).toLocaleDateString()}). ` +
+          "Ask whoever shared the folder for a new join code and paste it into “Join shared folder…” to renew.",
+        12000,
+      );
+    }
   }
 
   /**
@@ -408,7 +430,18 @@ export default class CoeditPlugin extends Plugin {
       }
     } catch (err) {
       console.error(`coedit: could not sync "${config.localPath}"`, err);
-      new Notice(`Coedit: "${config.localPath}" offline — ${err instanceof Error ? err.message : err}`);
+      const token = this.effectiveSettings(config).token;
+      if (isExpiredInvite(token)) {
+        // The generic message below would be a sync timeout — true, but it
+        // sends people hunting for a network problem that isn't there.
+        new Notice(
+          `Coedit: your invite to "${config.localPath}" expired on ${new Date(inviteExpiry(token) ?? 0).toLocaleDateString()}, so it has stopped syncing. ` +
+            "Ask whoever shared it for a new join code and paste it into “Join shared folder…” to reconnect.",
+          20000,
+        );
+      } else {
+        new Notice(`Coedit: "${config.localPath}" offline — ${err instanceof Error ? err.message : err}`);
+      }
     }
     this.bindings.scan();
     // Warm the per-note IndexedDB state in the background so first opens
@@ -467,6 +500,18 @@ export default class CoeditPlugin extends Plugin {
    * carries its own connection, so shares from different people coexist.
    */
   async joinWithCode(code: JoinCode, localPath: string): Promise<void> {
+    if (isExpiredInvite(code.token)) {
+      new Notice(
+        `Coedit: that join code's invite expired on ${new Date(inviteExpiry(code.token) ?? 0).toLocaleDateString()}. Ask the sharer for a new one.`,
+        10000,
+      );
+      return;
+    }
+    const existing = this.settings.sharedFolders.find((c) => c.folderId === code.folderId);
+    if (existing) {
+      await this.renewAccess(existing, code);
+      return;
+    }
     if (!this.settings.serverHost || !this.settings.token) {
       this.settings.serverHost = code.host;
       this.settings.token = code.token;
@@ -480,6 +525,44 @@ export default class CoeditPlugin extends Plugin {
       localPath,
       matchesGlobals ? undefined : { host: code.host, token: code.token },
     );
+  }
+
+  /**
+   * A join code for a folder this vault already has: swap in its credential
+   * instead of refusing. The folder stays where it is — the local path typed
+   * in the join dialog is ignored.
+   */
+  private async renewAccess(existing: SharedFolderConfig, code: JoinCode): Promise<void> {
+    const plan = planCredentialRefresh(
+      { host: this.settings.serverHost, token: this.settings.token },
+      existing,
+      code,
+    );
+    if (plan.kind === "same") {
+      new Notice(`Coedit: "${existing.localPath}" is already joined with this code.`);
+      return;
+    }
+    if (plan.kind === "downgrade") {
+      new Notice(
+        `Coedit: "${existing.localPath}" already connects with the server's full secret — not replacing it with an invite. Unlink the folder first if that's really what you want.`,
+        10000,
+      );
+      return;
+    }
+    if (plan.kind === "global") {
+      this.settings.token = plan.token;
+    } else {
+      existing.host = plan.host;
+      existing.token = plan.token;
+    }
+    await this.saveSettings();
+    const expiry = inviteExpiry(code.token);
+    new Notice(
+      `Coedit: access to "${existing.localPath}" renewed` +
+        (expiry === null ? "." : ` — valid until ${new Date(expiry).toLocaleDateString()}.`),
+      8000,
+    );
+    this.restartSession();
   }
 
   private async joinFolder(
@@ -541,8 +624,13 @@ export default class CoeditPlugin extends Plugin {
     }
     const connected = this.folders.filter((f) => f.provider.wsconnected);
     if (connected.length === 0) {
+      // An expired invite retries forever and would otherwise sit on
+      // "connecting…" — the Notice explaining it is long gone by then.
+      const expired = this.folders.every((f) =>
+        isExpiredInvite(this.effectiveSettings(f.config).token),
+      );
       const connecting = this.folders.some((f) => f.provider.wsconnecting);
-      this.setStatus(connecting ? "connecting…" : "offline");
+      this.setStatus(expired ? "invite expired" : connecting ? "connecting…" : "offline");
       return;
     }
     const peers = this.presence.peerNames().size;

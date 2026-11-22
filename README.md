@@ -51,6 +51,14 @@ Then in the plugin settings set the server host to
 `<worker>.<account>.workers.dev` and the shared secret, and use the
 "Share folder…" / "Join shared folder…" commands.
 
+Guests don't need the secret itself: "Create invite token…" copies a join
+code carrying a per-person invite (read-write or read-only) that expires,
+90 days by default. There is no auto-renewal. In its last week the guest's
+plugin warns them, and after expiry it says so instead of reporting a sync
+timeout. To renew, create a new invite and have them paste the new join code
+into "Join shared folder…"; it replaces the credential on the folder they
+already have.
+
 ## Known limitations (deliberate MVP cuts)
 
 - One shared folder per vault; markdown files only (no attachments).

@@ -134,6 +134,74 @@ describe("invite token helpers", () => {
   });
 });
 
+describe("invite expiry", () => {
+  it("reads the expiry out of an invite and ignores the master secret", async () => {
+    const { inviteExpiry, isExpiredInvite } = await import("../src/paths");
+    expect(inviteExpiry("bmFtZQ.1000.rw.abcd")).toBe(1000);
+    expect(inviteExpiry("a".repeat(40))).toBeNull();
+    expect(inviteExpiry("bmFtZQ.soon.rw.abcd")).toBeNull();
+    expect(isExpiredInvite("bmFtZQ.1000.rw.abcd", 1001)).toBe(true);
+    expect(isExpiredInvite("bmFtZQ.1000.rw.abcd", 999)).toBe(false);
+    // The master secret never expires, whatever the clock says.
+    expect(isExpiredInvite("a".repeat(40), Number.MAX_SAFE_INTEGER)).toBe(false);
+  });
+});
+
+describe("planCredentialRefresh", () => {
+  const host = "coedit-sync.example.workers.dev";
+  const master = "m".repeat(40);
+  const oldInvite = "c2Ft.1000.rw.aaaa";
+  const newInvite = "c2Ft.9000.rw.bbbb";
+
+  it("renews a guest's vault-global invite in place", async () => {
+    const { planCredentialRefresh } = await import("../src/paths");
+    expect(
+      planCredentialRefresh({ host, token: oldInvite }, {}, { host: host.toUpperCase(), token: newInvite }),
+    ).toEqual({ kind: "global", token: newInvite });
+  });
+
+  it("renews a folder that carries its own connection without touching the globals", async () => {
+    const { planCredentialRefresh } = await import("../src/paths");
+    expect(
+      planCredentialRefresh(
+        { host: "mine.example", token: master },
+        { host, token: oldInvite },
+        { host, token: newInvite },
+      ),
+    ).toEqual({ kind: "folder", host, token: newInvite });
+  });
+
+  it("follows a share that moved to a different server", async () => {
+    const { planCredentialRefresh } = await import("../src/paths");
+    expect(
+      planCredentialRefresh({ host, token: oldInvite }, {}, { host: "new.example", token: newInvite }),
+    ).toEqual({ kind: "folder", host: "new.example", token: newInvite });
+  });
+
+  it("is a no-op for the credential already in use", async () => {
+    const { planCredentialRefresh } = await import("../src/paths");
+    expect(planCredentialRefresh({ host, token: newInvite }, {}, { host, token: newInvite })).toEqual({
+      kind: "same",
+    });
+  });
+
+  it("never demotes the server's full secret to an invite", async () => {
+    const { planCredentialRefresh } = await import("../src/paths");
+    expect(planCredentialRefresh({ host, token: master }, {}, { host, token: newInvite })).toEqual({
+      kind: "downgrade",
+    });
+    // …but a rotated secret, or an upgrade from invite to secret, goes through.
+    expect(planCredentialRefresh({ host, token: master }, {}, { host, token: "n".repeat(40) })).toEqual({
+      kind: "global",
+      token: "n".repeat(40),
+    });
+    expect(planCredentialRefresh({ host, token: oldInvite }, {}, { host, token: master })).toEqual({
+      kind: "global",
+      token: master,
+    });
+  });
+});
+
 describe("base64UrlEncode", () => {
   it("handles non-Latin-1 input without throwing", async () => {
     const { base64UrlEncode } = await import("../src/paths");

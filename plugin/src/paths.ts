@@ -47,6 +47,56 @@ export function isReadOnlyToken(token: string): boolean {
   return parts.length === 4 && parts[2] === "ro";
 }
 
+/** Expiry (ms since epoch) carried by an invite token; null for the master secret. */
+export function inviteExpiry(token: string): number | null {
+  const parts = token.split(".");
+  if (parts.length !== 4) return null;
+  const expiry = Number(parts[1]);
+  return Number.isFinite(expiry) ? expiry : null;
+}
+
+/**
+ * The server only says 403 (and a rejected WebSocket says nothing at all),
+ * so the client reads the expiry out of its own token to explain why a
+ * folder went quiet. The server stays the authority on whether it's valid.
+ */
+export function isExpiredInvite(token: string, now = Date.now()): boolean {
+  const expiry = inviteExpiry(token);
+  return expiry !== null && expiry < now;
+}
+
+export type CredentialRefresh =
+  /** The code carries the credential the folder already connects with. */
+  | { kind: "same" }
+  /** The folder holds the server's full secret; an invite would demote it. */
+  | { kind: "downgrade" }
+  /** The folder rides the vault-global credential: replace that token. */
+  | { kind: "global"; token: string }
+  /** The folder carries (or now needs) its own connection. */
+  | { kind: "folder"; host: string; token: string };
+
+/**
+ * Decide how a join code for an ALREADY-joined folder renews its access.
+ * Invites expire and secrets rotate; without this the only way back in was
+ * unlinking the folder and joining again.
+ */
+export function planCredentialRefresh(
+  globals: { host: string; token: string },
+  folder: { host?: string; token?: string },
+  code: { host: string; token: string },
+): CredentialRefresh {
+  const currentHost = folder.host ?? globals.host;
+  const currentToken = folder.token ?? globals.token;
+  const sameHost = code.host.toLowerCase() === currentHost.toLowerCase();
+  if (sameHost && code.token === currentToken) return { kind: "same" };
+  if (sameHost && currentToken && !isInviteToken(currentToken) && isInviteToken(code.token)) {
+    return { kind: "downgrade" };
+  }
+  const usesGlobals = folder.host === undefined && folder.token === undefined;
+  if (usesGlobals && sameHost) return { kind: "global", token: code.token };
+  return { kind: "folder", host: code.host, token: code.token };
+}
+
 export type OpenModifyKind =
   /** Disk equals the CRDT — a clean autosave. */
   | "in-sync"
